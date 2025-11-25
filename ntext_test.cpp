@@ -3,6 +3,22 @@
 // TODO:
 // Figure out how to represent utf-8. Without too much friction.
 
+// NOTE:
+// The API is still quite shaky. Unsure about this whole bitmap stuff
+// (Pointer vs stack). I mean, it's mostly a persistent data makes no sense to keep
+// on stack? I think it's fine. Just maybe the internals are weird?
+
+// WARN:
+// I have found a major weakness for this API:
+// We persist a full bitmap in memory. A simple greyscale 1024x1024 is 1 mib of
+// memory. Most of this memory is actually useless. Uhm. This is quite a big problem.
+
+// WARN:
+// So my solution was that, we just use bitmaps as the output of CloseCollection
+// you basically receive an array of bitmaps to copy. Simple. But what about
+// memory spikes, meaning a frame that has a big spike in memory usage, this will
+// overflow the arena. But I mean, I can make that user controlled quite easily.
+
 int main()
 {
     ntext::ntext_params ContextParams =
@@ -13,18 +29,9 @@ int main()
     };
     ntext::context Context = CreateContext(ContextParams);
 
-    ntext::bitmap_params BitmapParams =
-    {
-        .Buffer = malloc(0),
-        .Format = ntext::BitmapFormat::GreyScale,
-        .Width  = 1024,
-        .Height = 1024,
-    };
-    ntext::bitmap Bitmap = CreateBitmap(BitmapParams);
-
     if(ntext::IsValidContext(Context))
     {
-        ntext::collection Collection = ntext::OpenCollection(Bitmap);
+        ntext::collection Collection = ntext::OpenCollection(0);
 
         ntext::PushCollection((void *)"a", Collection, Context);
         ntext::PushCollection((void *)"b", Collection, Context);
