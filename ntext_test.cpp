@@ -38,9 +38,9 @@ int main()
 
         ntext::collection Collection = ntext::OpenCollection(ntext::TextureFormat::GreyScale);
 
-        ntext::PushStringInCollection("a", Collection, Context);
-        ntext::PushStringInCollection("b", Collection, Context);
-        ntext::PushStringInCollection("c", Collection, Context);
+        ntext::PushStringInCollection("a", 1, Collection, Context);
+        ntext::PushStringInCollection("b", 1, Collection, Context);
+        ntext::PushStringInCollection("c", 1, Collection, Context);
 
         // NOTE:
         // Iterate Collection -> Check if we need to do anything -> Rasterize -> Allocate Into Bitmap -> Return List of copies.

@@ -31,6 +31,7 @@ static inline unsigned FindFirstBit(uint32_t Mask)
 
 #elif NTEXT_CLANG || NTEXT_GNU
 
+
 static inline unsigned FindFirstBit(uint32_t Mask)
 {
     NTEXT_ASSERT(Mask != 0);
@@ -39,6 +40,14 @@ static inline unsigned FindFirstBit(uint32_t Mask)
 
 #else
     #error "FindFirstBit not supported for this compiler."
+#endif
+
+#if NTEXT_MSVC || NTEXT_CLANG
+#define AlignOf(T) __alignof(T)
+#elif NTEXT_GNU
+#define AlignOf(T) __alignof(T)__
+#else
+    #error "AlignOf not supported for this compiler"
 #endif
 
 
@@ -124,6 +133,11 @@ LeaveMemoryRegion(memory_region Region)
 {
     Region.Arena->Position = Region.Position;
 }
+
+#define PushArrayNoZeroAligned(a, T, c, align) (T *)PushArena((a), sizeof(T)*(c), (align))
+#define PushArrayAligned(a, T, c, align) (T *)(PushArrayNoZeroAligned(a, T, c, align), sizeof(T)*(c))
+#define PushArray(a, T, c) PushArrayAligned(a, T, c, max(8, AlignOf(T)))
+#define PushStruct(a, T)   PushArrayAligned(a, T, 1, max(8, AlignOf(T)))
 
 // ====================================================================================
 // @Internal : Win32 Implementation
@@ -752,6 +766,108 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
 }
 
 // ===================================================================================
+// @Public : NText UTF8 Handling
+
+struct utf8_string
+{
+    char    *Data;
+    uint64_t Size;
+};
+
+struct unicode_decode
+{
+    uint32_t Increment;
+    uint32_t Codepoint;
+};
+
+static uint8_t UTF8ByteClass[32] = 
+{
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,2,2,2,2,3,3,4,5,
+};
+
+// Decoding the byte class
+// 0xxx xxxx >> 3 == 0000 xxxx | Range = 0..15  (ASCII)
+// 10xx xxxx >> 3 == 0001 0xxx | Range = 16..23 (ContByte/Invalid)
+// 110x xxxx >> 3 == 0001 10xx | Range = 24..27 (2 bytes)
+// 1110 xxxx >> 3 == 0001 110x | Range = 28..29 (3 bytes)
+// 1111 0xxx >> 3 == 0001 1110 | Range = 30     (4 bytes)
+// 1111 1xxx >> 3 == 0001 1111 | Range = 32     (Invalid)
+
+// Decoding code point (x represents payload).
+// Always mask payload size in byte and shift by sum of cont bytes payload size.
+// 1 byte -> 0xxx xxxx                               -> Code Point == (Byte0)
+// 2 byte -> 110x xxxx 10yy yyyy                     -> Code Point == (Byte0 & BitMask5) << 6  | (Byte1 & BitMask6)
+// 3 byte -> 1110 xxxx 10yy yyyy 10zz zzzz           -> Code Point == (Byte0 & BitMask4) << 12 | (Byte1 & BitMask6) << 6  | (Byte2 & BitMask6)
+// 4 byte -> 1111 1xxx 10yy yyyy 10zz zzzz 10ww wwww -> Code Point == (Byte0 & BitMask3) << 18 | (Byte1 & BitMask6) << 12 | (Byte2 & BitMask6) << 6 | (Byte3 & BitMask6)
+
+static unicode_decode
+DecodeUTF8(uint8_t *String, uint64_t Maximum)
+{
+    unicode_decode Result = {1, _UI32_MAX};
+
+    uint8_t Byte      = String[0];
+    uint8_t ByteClass = UTF8ByteClass[Byte >> 3];
+
+    switch (ByteClass)
+    {
+
+    case 1:
+    {
+        Result.Codepoint = Byte;
+    } break;
+
+    case 2:
+    {
+        if (1 < Maximum)
+        {
+            uint8_t ContByte = String[1];
+            if (UTF8ByteClass[ContByte >> 3] == 0)
+            {
+                Result.Codepoint  = (Byte     & 0b00011111) << 6;
+                Result.Codepoint |= (ContByte & 0b00111111) << 0;
+                Result.Increment  = 2;
+            }
+        }
+    } break;
+
+    case 3:
+    {
+        if (2 < Maximum)
+        {
+            uint8_t ContByte[2] = {String[1], String[2]};
+            if (UTF8ByteClass[ContByte[0] >> 3] == 0 && UTF8ByteClass[ContByte[1] >> 3] == 0)
+            {
+                Result.Codepoint  = ((Byte        & 0b00001111) << 12);
+                Result.Codepoint |= ((ContByte[0] & 0b00111111) << 6 );
+                Result.Codepoint |= ((ContByte[1] & 0b00111111) << 0 );
+                Result.Increment  = 3;
+            }
+        }
+    } break;
+
+    case 4:
+    {
+        if (3 < Maximum)
+        {
+            uint8_t ContByte[3] = {String[1], String[2], String[3]};
+            if (UTF8ByteClass[ContByte[0] >> 3] == 0 && UTF8ByteClass[ContByte[1] >> 3] == 0 && UTF8ByteClass[ContByte[2] >> 3] == 0)
+            {
+                Result.Codepoint  = (Byte        & 0b00000111) << 18;
+                Result.Codepoint |= (ContByte[0] & 0b00111111) << 12;
+                Result.Codepoint |= (ContByte[1] & 0b00111111) << 6;
+                Result.Codepoint |= (ContByte[2] & 0b00111111) << 0;
+                Result.Increment = 4;
+            }
+        }
+    } break;
+
+    }
+
+    return Result;
+}
+
+
+// ==================================================================================
 // @Public : NText Context
 
 enum class TextStorage
@@ -827,7 +943,7 @@ enum class TextureFormat
 
 struct collection_item
 {
-    void *UTF8;
+    utf8_string String;
 };
 
 struct collection_node
@@ -883,19 +999,33 @@ static collection OpenCollection(TextureFormat Format)
 }
 
 static void
-PushStringInCollection(char *String, collection &Collection, context &Context)
+PushStringInCollection(char *String, uint64_t Size, collection &Collection, context &Context)
 {
-    // NOTE:
-    // Here we simply create a new collection node and append it to the list.
-    // We copy the string into the frame arena. Then we process every input depending on the mode chosen for the context.
-    // Then we can test a lot: Hashmap->Raster(Needs Cleanups)->Return
-    // Then implement a D3D11 example. And we are done? (I'm sure I'll still be on this in a month)
+    collection_node *Node = PushStruct(Context.Arena, collection_node);
+    if(Node)
+    {
+        Node->Value.String.Data = String;
+        Node->Value.String.Size = Size;
+
+        if(!Collection.First)
+        {
+            Collection.First = Node;
+        }
+
+        if(Collection.Last)
+        {
+            Collection.Last->Next = Node;
+        }
+
+        Collection.Last = Node;
+    }
+
 }
 
 static void
-PushStringInCollection(const char *String, collection &Collection, context &Context)
+PushStringInCollection(const char *String, uint64_t Size, collection &Collection, context &Context)
 {
-    PushStringInCollection((char *)String, Collection, Context);
+    PushStringInCollection((char *)String, Size, Collection, Context);
 }
 
 static void
@@ -906,6 +1036,10 @@ CloseCollection(collection &Collection, context &Context)
 
     case TextStorage::LazyAtlas:
     {
+        for(collection_node *Node = Collection.First; Node != 0; Node = Node->Next)
+        {
+            // NOTE: Decode UTF8? How does it work.
+        }
     } break;
 
     case TextStorage::None:
