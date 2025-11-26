@@ -86,6 +86,10 @@ typedef struct memory_region
 static void *
 PushArena(memory_arena *Arena, uint64_t Size, uint64_t Alignment)
 {
+    NTEXT_ASSERT(Arena);
+    NTEXT_ASSERT(Size);
+    NTEXT_ASSERT(Alignment);
+
     void *Result = 0;
 
     uint64_t PrePosition  = NTEXT_ALIGNPOW2(Arena->Position, Alignment);
@@ -135,20 +139,120 @@ LeaveMemoryRegion(memory_region Region)
 }
 
 #define PushArrayNoZeroAligned(a, T, c, align) (T *)PushArena((a), sizeof(T)*(c), (align))
-#define PushArrayAligned(a, T, c, align) (T *)(PushArrayNoZeroAligned(a, T, c, align), sizeof(T)*(c))
+#define PushArrayAligned(a, T, c, align) PushArrayNoZeroAligned(a, T, c, align)
 #define PushArray(a, T, c) PushArrayAligned(a, T, c, max(8, AlignOf(T)))
 #define PushStruct(a, T)   PushArrayAligned(a, T, 1, max(8, AlignOf(T)))
+
+// ===================================================================================
+// @Public : NText UTF8 Handling
+
+struct utf8_string
+{
+    char *Data;
+    uint64_t Size;
+};
+
+struct unicode_decode
+{
+    uint32_t Increment;
+    uint32_t Codepoint;
+};
+
+static uint8_t UTF8ByteClass[32] =
+{
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,2,2,2,2,3,3,4,5,
+};
+
+// Decoding the byte class
+// 0xxx xxxx >> 3 == 0000 xxxx | Range = 0..15  (ASCII)
+// 10xx xxxx >> 3 == 0001 0xxx | Range = 16..23 (ContByte/Invalid)
+// 110x xxxx >> 3 == 0001 10xx | Range = 24..27 (2 bytes)
+// 1110 xxxx >> 3 == 0001 110x | Range = 28..29 (3 bytes)
+// 1111 0xxx >> 3 == 0001 1110 | Range = 30     (4 bytes)
+// 1111 1xxx >> 3 == 0001 1111 | Range = 32     (Invalid)
+
+// Decoding code point (x represents payload).
+// Always mask payload size in byte and shift by sum of cont bytes payload size.
+// 1 byte -> 0xxx xxxx                               -> Code Point == (Byte0)
+// 2 byte -> 110x xxxx 10yy yyyy                     -> Code Point == (Byte0 & BitMask5) << 6  | (Byte1 & BitMask6)
+// 3 byte -> 1110 xxxx 10yy yyyy 10zz zzzz           -> Code Point == (Byte0 & BitMask4) << 12 | (Byte1 & BitMask6) << 6  | (Byte2 & BitMask6)
+// 4 byte -> 1111 1xxx 10yy yyyy 10zz zzzz 10ww wwww -> Code Point == (Byte0 & BitMask3) << 18 | (Byte1 & BitMask6) << 12 | (Byte2 & BitMask6) << 6 | (Byte3 & BitMask6)
+
+static unicode_decode
+DecodeUTF8(uint8_t *String, uint64_t Maximum)
+{
+    unicode_decode Result = { 1, _UI32_MAX };
+
+    uint8_t Byte = String[0];
+    uint8_t ByteClass = UTF8ByteClass[Byte >> 3];
+
+    switch (ByteClass)
+    {
+
+    case 1:
+    {
+        Result.Codepoint = Byte;
+    } break;
+
+    case 2:
+    {
+        if (1 < Maximum)
+        {
+            uint8_t ContByte = String[1];
+            if (UTF8ByteClass[ContByte >> 3] == 0)
+            {
+                Result.Codepoint = (Byte & 0b00011111) << 6;
+                Result.Codepoint |= (ContByte & 0b00111111) << 0;
+                Result.Increment = 2;
+            }
+        }
+    } break;
+
+    case 3:
+    {
+        if (2 < Maximum)
+        {
+            uint8_t ContByte[2] = { String[1], String[2] };
+            if (UTF8ByteClass[ContByte[0] >> 3] == 0 && UTF8ByteClass[ContByte[1] >> 3] == 0)
+            {
+                Result.Codepoint = ((Byte & 0b00001111) << 12);
+                Result.Codepoint |= ((ContByte[0] & 0b00111111) << 6);
+                Result.Codepoint |= ((ContByte[1] & 0b00111111) << 0);
+                Result.Increment = 3;
+            }
+        }
+    } break;
+
+    case 4:
+    {
+        if (3 < Maximum)
+        {
+            uint8_t ContByte[3] = { String[1], String[2], String[3] };
+            if (UTF8ByteClass[ContByte[0] >> 3] == 0 && UTF8ByteClass[ContByte[1] >> 3] == 0 && UTF8ByteClass[ContByte[2] >> 3] == 0)
+            {
+                Result.Codepoint = (Byte & 0b00000111) << 18;
+                Result.Codepoint |= (ContByte[0] & 0b00111111) << 12;
+                Result.Codepoint |= (ContByte[1] & 0b00111111) << 6;
+                Result.Codepoint |= (ContByte[2] & 0b00111111) << 0;
+                Result.Increment = 4;
+            }
+        }
+    } break;
+
+    }
+
+    return Result;
+}
+
 
 // ====================================================================================
 // @Internal : Win32 Implementation
 
 #ifdef NTEXT_WIN32
 
-using Microsoft::WRL::ComPtr;
-
-static bool WriteGrayscaleBMP(const wchar_t *path, int w, int h, const std::vector<BYTE> &pixels)
+static bool WriteGrayscaleBMP(const wchar_t *path, int w, int h, BYTE *Pixels)
 {
-    if (w <= 0 || h <= 0 || (int)pixels.size() < w * h) return false;
+    if (w <= 0 || h <= 0) return false;
 
     const int rowBytesUnpadded = w;
     const int rowBytes = (rowBytesUnpadded + 3) & ~3;
@@ -197,7 +301,7 @@ static bool WriteGrayscaleBMP(const wchar_t *path, int w, int h, const std::vect
 
     std::vector<BYTE> pad(rowBytes - rowBytesUnpadded);
     for (int y = h - 1; y >= 0; --y) {
-        const BYTE *rowSrc = pixels.data() + y * w;
+        const BYTE *rowSrc = Pixels + y * w;
         f.write((const char *)rowSrc, rowBytesUnpadded);
         if (!pad.empty()) f.write((const char *)pad.data(), (std::streamsize)pad.size());
     }
@@ -260,120 +364,97 @@ static bool IsValidOSContext(os_context Context)
     return Result;
 }
 
-// NOTE:
-// So this works. Now I just figured that:: we don't really need a bitmap, because we can rasterize into our arena.
-// So this whole bitmap thing is not really important. The only thing we need is: a packer. I think. Uhm. Yeah?
-// Or at least, the bitmap has no memory. Because we just write into you arena and return those bitmaps, bitmaps are what
-// we return. This seems smarter. So we need to initialize platform specific things into the OS context. This seems to be done
-
-static int TryRasterizeAndDump(os_context OS)
+static void
+TryRasterizeAndDump(os_context Context, memory_arena *Arena)
 {
-    HRESULT hr;
+    IDWriteFontFace *FontFace = Context.Font;
+    IDWriteFactory  *DWrite   = Context.DirectWrite;
 
-    IDWriteFontFace *fontFace = OS.Font;
-    IDWriteFactory  *dwrite   = OS.DirectWrite;
+    const wchar_t *Text       = L"Hello, DWrite";
+    const UINT32   TextLength = (UINT32)wcslen(Text);
 
-    const wchar_t *text = L"Hello, DWrite";
-    const UINT32 textLength = (UINT32)wcslen(text);
-
-    std::vector<UINT32> codepoints;
-    codepoints.reserve(textLength);
-    for (UINT32 i = 0; i < textLength; ++i) codepoints.push_back((UINT32)text[i]);
-
-    std::vector<UINT16> glyphIndices(codepoints.size());
-    hr = fontFace->GetGlyphIndices(codepoints.data(), (UINT32)codepoints.size(), glyphIndices.data());
-    if (FAILED(hr)) { std::wcerr << L"GetGlyphIndices failed: 0x" << std::hex << hr << L"\n"; return -1; }
-
-    const UINT32 glyphCount = (UINT32)glyphIndices.size();
-    if (glyphCount == 0) { std::wcerr << L"No glyphs\n"; return 0; }
-
-    DWRITE_FONT_METRICS fontMetrics;
-    fontFace->GetMetrics(&fontMetrics);
-    UINT32 designUnitsPerEm = fontMetrics.designUnitsPerEm;
-    if (designUnitsPerEm == 0) { std::wcerr << L"Bad design units per em\n"; return -1; }
-
-    std::vector<DWRITE_GLYPH_METRICS> glyphMetrics(glyphCount);
-    hr = fontFace->GetDesignGlyphMetrics(glyphIndices.data(), glyphCount, glyphMetrics.data(), FALSE);
-    if (FAILED(hr)) { std::wcerr << L"GetDesignGlyphMetrics failed: 0x" << std::hex << hr << L"\n"; return -1; }
-
-    const FLOAT fontEmSize = 64.0f;
-
-    std::vector<FLOAT> advances(glyphCount);
-    const FLOAT scale = fontEmSize / static_cast<FLOAT>(designUnitsPerEm);
-    for (UINT32 i = 0; i < glyphCount; ++i) {
-        advances[i] = static_cast<FLOAT>(glyphMetrics[i].advanceWidth) * scale;
+    UINT32 *Codepoints = (UINT32 *)PushArray(Arena, UINT32, TextLength);
+    for(UINT32 Idx = 0; Idx < TextLength; ++Idx)
+    {
+        Codepoints[Idx] = (UINT32)Text[Idx];
     }
 
-    std::vector<DWRITE_GLYPH_OFFSET> offsets(glyphCount);
-    for (UINT32 i = 0; i < glyphCount; ++i) {
-        offsets[i].advanceOffset = 0;
-        offsets[i].ascenderOffset = 0;
+    UINT16 *GlyphIndices = (UINT16 *)PushArray(Arena, UINT16, TextLength);
+    FontFace->GetGlyphIndices(Codepoints, TextLength, GlyphIndices);
+
+    UINT32 GlyphCount = TextLength;
+
+    DWRITE_FONT_METRICS FontMetrics = {};
+    FontFace->GetMetrics(&FontMetrics);
+    UINT32 DesignUnitsPerEm = FontMetrics.designUnitsPerEm;
+
+    DWRITE_GLYPH_METRICS *GlyphMetrics = (DWRITE_GLYPH_METRICS *)PushArray(Arena, DWRITE_GLYPH_METRICS, GlyphCount);
+
+    FontFace->GetDesignGlyphMetrics(GlyphIndices, GlyphCount, GlyphMetrics, FALSE);
+
+    FLOAT  FontEmSize = 64.0f;
+    FLOAT *Advances   = (FLOAT *)PushArray(Arena, FLOAT, GlyphCount);
+    FLOAT  Scale      = FontEmSize / (FLOAT)DesignUnitsPerEm;
+
+    for(UINT32 Idx = 0; Idx < GlyphCount; ++Idx)
+    {
+        Advances[Idx] = (FLOAT)GlyphMetrics[Idx].advanceWidth * Scale;
     }
 
-    DWRITE_GLYPH_RUN glyphRun = {};
-    glyphRun.fontFace = fontFace;
-    glyphRun.fontEmSize = fontEmSize;
-    glyphRun.glyphCount = glyphCount;
-    glyphRun.glyphIndices = glyphIndices.data();
-    glyphRun.glyphAdvances = advances.data();
-    glyphRun.glyphOffsets = offsets.data();
-    glyphRun.bidiLevel = 0;
-    glyphRun.isSideways = FALSE;
+    DWRITE_GLYPH_OFFSET *Offsets = (DWRITE_GLYPH_OFFSET *)PushArray(Arena, DWRITE_GLYPH_OFFSET, GlyphCount);
 
-    ComPtr<IDWriteGlyphRunAnalysis> runAnalysis;
-    hr = dwrite->CreateGlyphRunAnalysis(
-        &glyphRun,
-        1.f,
-        nullptr,
+    for(UINT32 Idx = 0; Idx < GlyphCount; ++Idx)
+    {
+        Offsets[Idx].advanceOffset  = 0.0f;
+        Offsets[Idx].ascenderOffset = 0.0f;
+    }
+
+    // NOTE:
+    // This is specified as containing all of the information needed to draw.
+    // Hence, if I just store this information, then the user should be able
+    // to do anything? Now the problem is: Do we just rasterize glyph by glyph?
+    // Do we allow more? For simplicity we could force glyph by glyph for now.
+
+    DWRITE_GLYPH_RUN GlyphRun = {};
+    GlyphRun.fontFace      = FontFace;
+    GlyphRun.fontEmSize    = FontEmSize;
+    GlyphRun.glyphCount    = GlyphCount;
+    GlyphRun.glyphIndices  = GlyphIndices;
+    GlyphRun.glyphAdvances = Advances;
+    GlyphRun.glyphOffsets  = Offsets;
+    GlyphRun.bidiLevel     = 0;
+    GlyphRun.isSideways    = FALSE;
+
+    IDWriteGlyphRunAnalysis *RunAnalysis;
+    DWrite->CreateGlyphRunAnalysis(
+        &GlyphRun,
+        1.0f,
+        0,
         DWRITE_RENDERING_MODE_ALIASED,
         DWRITE_MEASURING_MODE_NATURAL,
         0.0f,
         0.0f,
-        &runAnalysis);
-    if (FAILED(hr)) {
-        std::wcerr << L"CreateGlyphRunAnalysis failed: 0x" << std::hex << hr << L"\n";
-        return -1;
-    }
+        &RunAnalysis);
 
-    RECT texBounds = {};
-    hr = runAnalysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &texBounds);
-    if (FAILED(hr)) {
-        std::wcerr << L"GetAlphaTextureBounds failed: 0x" << std::hex << hr << L"\n";
-        return -1;
-    }
+    RECT TexBounds = {};
+    RunAnalysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &TexBounds);
 
-    int texW = texBounds.right - texBounds.left;
-    int texH = texBounds.bottom - texBounds.top;
-    if (texW <= 0 || texH <= 0) {
-        std::wcerr << L"Nothing to rasterize\n";
-        return 0;
-    }
+    INT TexW = TexBounds.right - TexBounds.left;
+    INT TexH = TexBounds.bottom - TexBounds.top;
 
-    std::wcout << L"Texture bounds: " << texW << L"x" << texH << L"\n";
+    UINT  BytesPerPixel   = 1;
+    UINT  BufferSize      = TexW * TexH * BytesPerPixel;
+    BYTE *AlphaBuffer     = (BYTE *)PushArray(Arena, BYTE, BufferSize);
+    RECT  RequestedBounds = TexBounds;
 
-    const UINT bytesPerPixel = 1;
-    const UINT bufferSize = texW * texH * bytesPerPixel;
-    std::vector<BYTE> alphaBuffer(bufferSize, 0);
-
-    RECT requestedBounds = texBounds;
-    hr = runAnalysis->CreateAlphaTexture(
+    RunAnalysis->CreateAlphaTexture(
         DWRITE_TEXTURE_ALIASED_1x1,
-        &requestedBounds,
-        alphaBuffer.data(),
-        bufferSize);
-    if (FAILED(hr)) {
-        std::wcerr << L"CreateAlphaTexture failed: 0x" << std::hex << hr << L"\n";
-        return -1;
-    }
+        &RequestedBounds,
+        AlphaBuffer,
+        BufferSize);
 
-    const wchar_t *outPath = L"glyph_alpha.bmp";
-    if (!WriteGrayscaleBMP(outPath, texW, texH, alphaBuffer)) {
-        std::wcerr << L"Failed to write BMP\n";
-        return -1;
-    }
-
-    std::wcout << L"Rasterized to: " << outPath << L" (" << texW << L"x" << texH << L")\n";
-    return 0;
+    const wchar_t *OutPath = L"glyph_alpha.bmp";
+    WriteGrayscaleBMP(OutPath, TexW, TexH, AlphaBuffer);
 }
 
 #endif // NTEXT_WIN32
@@ -611,12 +692,18 @@ struct glyph_tag
     uint8_t Value;
 };
 
+// NOTE:
+// Now that I think about it, we kind of have to implement some shaping and whatnot.
+// Since I have to shape the glyph.
+
 struct glyph_entry
 {
     glyph_hash Hash;
 
     uint64_t PrevLRU;
     uint64_t NextLRU;
+
+    bool IsRasterized;
 };
 
 struct glyph_table
@@ -628,6 +715,12 @@ struct glyph_table
     uint64_t GroupWidth;
     uint64_t GroupCount;
     uint64_t HashMask;
+};
+
+struct glyph_state
+{
+    uint64_t Id;
+    bool     IsRasterized;
 };
 
 constexpr uint8_t GlyphTableEmptyMask = 1 << 0;
@@ -644,7 +737,10 @@ IsValidGlyphTable(glyph_table *Table)
 static glyph_entry *
 GetGlyphEntry(uint64_t Index, glyph_table *Table)
 {
-    glyph_entry *Result = 0;
+    NTEXT_ASSERT(Table);
+    NTEXT_ASSERT(Index < (Table->GroupCount * Table->GroupWidth));
+
+    glyph_entry *Result = Table->Buckets + Index;
     return Result;
 }
 
@@ -659,6 +755,33 @@ static uint64_t
 GetGlyphGroupIndexFromHash(glyph_hash Hash, glyph_table *Table)
 {
     uint64_t Result = 0;
+
+    return Result;
+}
+
+// WARN:
+// Still don't know enough about hashes.
+
+static glyph_hash
+ComputeGlyphHash(utf8_string String)
+{
+    glyph_hash Result = {};
+
+    uint64_t FNVOffset = 0xcbf29ce484222325ULL;
+    uint64_t FNVPrime  = 0x100000001b3ULL;
+
+    uint64_t Hash = FNVOffset;
+    for (uint64_t Idx = 0; Idx < String.Size; ++Idx)
+    {
+        Hash ^= (uint64_t)String.Data[Idx];
+        Hash *= FNVPrime;
+    }
+
+    uint64_t LowAndHigh[2];
+    LowAndHigh[0] = Hash;
+    LowAndHigh[1] = String.Size;
+    memcpy(&Result.Value, LowAndHigh, sizeof(LowAndHigh));
+
     return Result;
 }
 
@@ -676,9 +799,11 @@ GlyphHashesAreEqual(glyph_hash A, glyph_hash B)
     return Result;
 }
 
-static glyph_entry *
+static glyph_state
 FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
 {
+    NTEXT_ASSERT(Table);
+
     glyph_entry *Result     = 0;
     uint64_t     EntryIndex = 0;
 
@@ -762,110 +887,12 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
     LastNext->PrevLRU = EntryIndex;
     Sentinel->NextLRU = EntryIndex;
 
-    return Result;
+    glyph_state State = {};
+    State.IsRasterized = 0;
+    State.Id           = EntryIndex;
+
+    return State;
 }
-
-// ===================================================================================
-// @Public : NText UTF8 Handling
-
-struct utf8_string
-{
-    char    *Data;
-    uint64_t Size;
-};
-
-struct unicode_decode
-{
-    uint32_t Increment;
-    uint32_t Codepoint;
-};
-
-static uint8_t UTF8ByteClass[32] = 
-{
-  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,2,2,2,2,3,3,4,5,
-};
-
-// Decoding the byte class
-// 0xxx xxxx >> 3 == 0000 xxxx | Range = 0..15  (ASCII)
-// 10xx xxxx >> 3 == 0001 0xxx | Range = 16..23 (ContByte/Invalid)
-// 110x xxxx >> 3 == 0001 10xx | Range = 24..27 (2 bytes)
-// 1110 xxxx >> 3 == 0001 110x | Range = 28..29 (3 bytes)
-// 1111 0xxx >> 3 == 0001 1110 | Range = 30     (4 bytes)
-// 1111 1xxx >> 3 == 0001 1111 | Range = 32     (Invalid)
-
-// Decoding code point (x represents payload).
-// Always mask payload size in byte and shift by sum of cont bytes payload size.
-// 1 byte -> 0xxx xxxx                               -> Code Point == (Byte0)
-// 2 byte -> 110x xxxx 10yy yyyy                     -> Code Point == (Byte0 & BitMask5) << 6  | (Byte1 & BitMask6)
-// 3 byte -> 1110 xxxx 10yy yyyy 10zz zzzz           -> Code Point == (Byte0 & BitMask4) << 12 | (Byte1 & BitMask6) << 6  | (Byte2 & BitMask6)
-// 4 byte -> 1111 1xxx 10yy yyyy 10zz zzzz 10ww wwww -> Code Point == (Byte0 & BitMask3) << 18 | (Byte1 & BitMask6) << 12 | (Byte2 & BitMask6) << 6 | (Byte3 & BitMask6)
-
-static unicode_decode
-DecodeUTF8(uint8_t *String, uint64_t Maximum)
-{
-    unicode_decode Result = {1, _UI32_MAX};
-
-    uint8_t Byte      = String[0];
-    uint8_t ByteClass = UTF8ByteClass[Byte >> 3];
-
-    switch (ByteClass)
-    {
-
-    case 1:
-    {
-        Result.Codepoint = Byte;
-    } break;
-
-    case 2:
-    {
-        if (1 < Maximum)
-        {
-            uint8_t ContByte = String[1];
-            if (UTF8ByteClass[ContByte >> 3] == 0)
-            {
-                Result.Codepoint  = (Byte     & 0b00011111) << 6;
-                Result.Codepoint |= (ContByte & 0b00111111) << 0;
-                Result.Increment  = 2;
-            }
-        }
-    } break;
-
-    case 3:
-    {
-        if (2 < Maximum)
-        {
-            uint8_t ContByte[2] = {String[1], String[2]};
-            if (UTF8ByteClass[ContByte[0] >> 3] == 0 && UTF8ByteClass[ContByte[1] >> 3] == 0)
-            {
-                Result.Codepoint  = ((Byte        & 0b00001111) << 12);
-                Result.Codepoint |= ((ContByte[0] & 0b00111111) << 6 );
-                Result.Codepoint |= ((ContByte[1] & 0b00111111) << 0 );
-                Result.Increment  = 3;
-            }
-        }
-    } break;
-
-    case 4:
-    {
-        if (3 < Maximum)
-        {
-            uint8_t ContByte[3] = {String[1], String[2], String[3]};
-            if (UTF8ByteClass[ContByte[0] >> 3] == 0 && UTF8ByteClass[ContByte[1] >> 3] == 0 && UTF8ByteClass[ContByte[2] >> 3] == 0)
-            {
-                Result.Codepoint  = (Byte        & 0b00000111) << 18;
-                Result.Codepoint |= (ContByte[0] & 0b00111111) << 12;
-                Result.Codepoint |= (ContByte[1] & 0b00111111) << 6;
-                Result.Codepoint |= (ContByte[2] & 0b00111111) << 0;
-                Result.Increment = 4;
-            }
-        }
-    } break;
-
-    }
-
-    return Result;
-}
-
 
 // ==================================================================================
 // @Public : NText Context
@@ -1019,7 +1046,6 @@ PushStringInCollection(char *String, uint64_t Size, collection &Collection, cont
 
         Collection.Last = Node;
     }
-
 }
 
 static void
@@ -1031,6 +1057,8 @@ PushStringInCollection(const char *String, uint64_t Size, collection &Collection
 static void
 CloseCollection(collection &Collection, context &Context)
 {
+    TryRasterizeAndDump(Context.OS, Context.Arena);
+
     switch(Context.TextStorage)
     {
 
@@ -1038,7 +1066,16 @@ CloseCollection(collection &Collection, context &Context)
     {
         for(collection_node *Node = Collection.First; Node != 0; Node = Node->Next)
         {
-            // NOTE: Decode UTF8? How does it work.
+            glyph_hash  Hash  = ComputeGlyphHash(Node->Value.String);
+            glyph_state State = FindGlyphEntryByHash(Hash, 0);
+            if(!State.IsRasterized)
+            {
+                // TODO:
+                // 1) Get Glyph Information
+                // 2) Allocate into context
+                // 3) Rasterize
+                // 4) Update Map
+            }
         }
     } break;
 

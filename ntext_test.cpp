@@ -24,7 +24,7 @@ int main()
     ntext::ntext_params ContextParams =
     {
         .TextStorage       = ntext::TextStorage::LazyAtlas,
-        .FrameMemoryBudget = 1024 * 10,
+        .FrameMemoryBudget = 1024 * 10 * 10,
         .FrameMemory       = malloc(1024 * 10),
     };
     ntext::context Context = CreateContext(ContextParams);
