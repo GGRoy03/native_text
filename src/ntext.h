@@ -751,91 +751,7 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
     return Result;
 }
 
-// ====================================================================================
-// @Public : NText Bitmaps
-
-enum class BitmapFormat
-{
-    None      = 0,
-    RGBA      = 1,
-    GreyScale = 2,
-};
-
-struct bitmap_params
-{
-    BitmapFormat Format;
-    uint32_t     Width;
-    uint32_t     Height;
-};
-
-struct bitmap
-{
-    void             *Buffer;
-    uint16_t          Width;
-    uint16_t          Height;
-    BitmapFormat      Format;
-    rectangle_packer *Packer;
-};
-
-static uint64_t GetBitmapBytesPerPixel(BitmapFormat Format)
-{
-    switch(Format)
-    {
-
-    case BitmapFormat::None:
-    {
-       return 0;
-    } break;
-
-    case BitmapFormat::GreyScale:
-    {
-        return 1;
-    } break;
-
-    case BitmapFormat::RGBA:
-    {
-        return 4;
-    } break;
-
-    }
-}
-
-static uint64_t GetBitmapFootprint(bitmap_params Params)
-{
-    uint64_t PackerSize       = GetRectanglePackerFootprint(Params.Width);
-    uint64_t BitmapBufferSize = Params.Width * Params.Height * GetBitmapBytesPerPixel(Params.Format);
-    uint64_t Result           = sizeof(bitmap) + PackerSize + BitmapBufferSize;
-
-    return Result;
-}
-
-static bitmap * CreateBitmap(bitmap_params Params, void *Memory)
-{
-    bitmap *Result = 0;
-
-    if(Memory)
-    {
-        void   *Buffer = Memory;
-        Result = (bitmap *)((uint8_t *)Buffer + (Params.Width * Params.Height *GetBitmapBytesPerPixel(Params.Format)));
-        void *PackerMemory = (Result + 1);
-
-        Result->Width  = Params.Width;
-        Result->Height = Params.Height;
-        Result->Format = Params.Format;
-        Result->Buffer = Buffer;
-        Result->Packer = CreateRectanglePacker(Params.Width, Params.Height, PackerMemory);
-    }
-
-    return Result;
-}
-
-static bool IsValidBitmap(bitmap *Bitmap)
-{
-    bool Result = (Bitmap) && (Bitmap->Buffer) && (Bitmap->Width > 0 && Bitmap->Height > 0) && (Bitmap->Format != BitmapFormat::None);
-    return Result;
-}
-
-// ====================================================================================
+// ===================================================================================
 // @Public : NText Context
 
 enum class TextStorage
@@ -849,26 +765,6 @@ struct ntext_params
     TextStorage TextStorage;
     uint64_t    FrameMemoryBudget;
     void       *FrameMemory;
-};
-
-struct collection_item
-{
-    void *UTF8;
-};
-
-struct collection_node
-{
-    collection_node *Next;
-    collection_item  Value;
-
-};
-
-struct collection
-{
-    collection_node *First;
-    collection_node *Last;
-    uint32_t         Count;
-    bitmap          *Bitmap;
 };
 
 struct context
@@ -919,36 +815,92 @@ static bool IsValidContext(context &Context)
     return Result;
 }
 
-static collection OpenCollection(bitmap *Bitmap)
+// ===================================================================================
+// @Public : NText Collection
+
+enum class TextureFormat
+{
+    None      = 0,
+    RGBA      = 1,
+    GreyScale = 2,
+};
+
+struct collection_item
+{
+    void *UTF8;
+};
+
+struct collection_node
+{
+    collection_node *Next;
+    collection_item  Value;
+};
+
+struct collection
+{
+    collection_node *First;
+    collection_node *Last;
+    uint32_t         Count;
+
+    TextureFormat    Format;
+    rectangle_packer Packer; // NOTE: Pointer?
+};
+
+static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
+{
+    switch(Format)
+    {
+
+    case TextureFormat::None:
+    {
+       return 0;
+    } break;
+
+    case TextureFormat::GreyScale:
+    {
+        return 1;
+    } break;
+
+    case TextureFormat::RGBA:
+    {
+        return 4;
+    } break;
+
+    }
+}
+
+static collection OpenCollection(TextureFormat Format)
 {
     collection Collection =
     {
         .First  = 0,
         .Last   = 0,
         .Count  = 0,
-        .Bitmap = Bitmap,
+        .Format = Format,
     };
 
     return Collection;
 }
 
-static void PushCollection(void *Something, collection &Collection, context &Context)
-{
-}
-
-static void CloseCollection(collection &Collection, context &Context)
+static void
+PushStringInCollection(char *String, collection &Collection, context &Context)
 {
     // NOTE:
-    // First of all. We have no idea how big this bitmap is. Because our collection
-    // is just a linked list of utf-8 strings. I believe what should happen is that:
-    // for every item in the collection, we simply pack it inside the packer.
-    // Hence for this function, we must have a packer. Thus we simply expose a packer
-    // instead of exposing bitmaps. We use this packer, we allocate, if success,
-    // call rasterizer with the utf-8 string. Oof, this is tricky.
-    // If we just return a bitmap, then the user is forced to literally copy the full
-    // thing into the texture. Unsure if that's the best way.. I mean.. I think it's
-    // just actually better to return a list of copies to do? Maybe?
+    // Here we simply create a new collection node and append it to the list.
+    // We copy the string into the frame arena. Then we process every input depending on the mode chosen for the context.
+    // Then we can test a lot: Hashmap->Raster(Needs Cleanups)->Return
+    // Then implement a D3D11 example. And we are done? (I'm sure I'll still be on this in a month)
+}
 
+static void
+PushStringInCollection(const char *String, collection &Collection, context &Context)
+{
+    PushStringInCollection((char *)String, Collection, Context);
+}
+
+static void
+CloseCollection(collection &Collection, context &Context)
+{
     switch(Context.TextStorage)
     {
 

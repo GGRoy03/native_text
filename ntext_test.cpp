@@ -31,11 +31,16 @@ int main()
 
     if(ntext::IsValidContext(Context))
     {
-        ntext::collection Collection = ntext::OpenCollection(0);
+        // NOTE:
+        // We would open some collection with a 2D allocator and a format.
+        // Then we can easily rasterize a list of CPU buffers with no knowledge of anything else.
+        // A collection is probably also a font, but what is TBD.
 
-        ntext::PushCollection((void *)"a", Collection, Context);
-        ntext::PushCollection((void *)"b", Collection, Context);
-        ntext::PushCollection((void *)"c", Collection, Context);
+        ntext::collection Collection = ntext::OpenCollection(ntext::TextureFormat::GreyScale);
+
+        ntext::PushStringInCollection("a", Collection, Context);
+        ntext::PushStringInCollection("b", Collection, Context);
+        ntext::PushStringInCollection("c", Collection, Context);
 
         // NOTE:
         // Iterate Collection -> Check if we need to do anything -> Rasterize -> Allocate Into Bitmap -> Return List of copies.
