@@ -1,21 +1,48 @@
 // ====================================================================================
-// @Internal : Context Cracking
+// @Internal : Includes & Context Cracking
+
+#include <immintrin.h>
+#include <stdint.h>
+
+#define NTEXT_ASSERT(Cond) do {if (!(Cond)) __assume(0);} while (0)
+#define NTEXT_ALIGNPOW2(x,b) (((x) + (b) - 1)&(~((b) - 1)))
 
 #ifdef _WIN32
 #define NTEXT_WIN32 1
 #endif
 
-// ====================================================================================
+#if defined(_MSV_VER)
+#define NTEXT_MSVC 1
+#elif defined(__clang__)
+#define NTEXT_CLANG 1
+#elif defined(__GNUC__)
+#define NTEXT_GNU 1
+#else
+#error "Unknown Compiler"
+#endif
 
-// ====================================================================================
-// @Internal : Includes
+#if NTEXT_MSVC
 
-#include <immintrin.h>
-#include <stdint.h>
+static inline unsigned FindFirstBit(uint32_t Mask)
+{
+    NTEXT_ASSERT(Mask != 0);
+    return _tzcnt_u32(Mask);
+}
+
+#elif NTEXT_CLANG || NTEXT_GNU
+
+static inline unsigned FindFirstBit(uint32_t Mask)
+{
+    NTEXT_ASSERT(Mask != 0);
+    return __builtin_ctz(Mask);
+}
+
+#else
+    #error "FindFirstBit not supported for this compiler."
+#endif
 
 
-#ifdef NTEXT_WIN32
-
+#if NTEXT_WIN32
 #include <windows.h>
 #include <dwrite.h>
 
@@ -26,7 +53,6 @@
 #include <iostream>
 
 #pragma comment(lib, "dwrite")
-
 #endif
 
 namespace ntext
@@ -34,9 +60,6 @@ namespace ntext
 
 // ====================================================================================
 // @Internal : Various Utilities
-
-#define NTEXT_ASSERT(Cond) do {if (!(Cond)) __assume(0);} while (0)
-#define NTEXT_ALIGNPOW2(x,b) (((x) + (b) - 1)&(~((b) - 1)))
 
 struct memory_arena
 {
@@ -368,6 +391,14 @@ struct packed_rectangle
     bool     WasPacked;
 };
 
+struct rectangle
+{
+    uint16_t Left;
+    uint16_t Top;
+    uint16_t Right;
+    uint16_t Bottom;
+};
+
 static uint64_t
 GetRectanglePackerFootprint(uint16_t Width)
 {
@@ -539,6 +570,185 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
     Rectangle.WasPacked = 1;
     Rectangle.X         = NewTopLeft.X;
     Rectangle.Y         = NewTopLeft.Y;
+}
+
+// ====================================================================================
+// @Public : NText Glyph Table Implementation
+
+enum class GlyphTableWidth
+{
+    None     = 0,
+    _128Bits = 16,
+};
+
+struct glyph_table_params
+{
+    GlyphTableWidth GroupWidth;
+    uint64_t        GroupCount;
+};
+
+struct glyph_hash
+{
+    __m128i Value;
+};
+
+struct glyph_tag
+{
+    uint8_t Value;
+};
+
+struct glyph_entry
+{
+    glyph_hash Hash;
+
+    uint64_t PrevLRU;
+    uint64_t NextLRU;
+};
+
+struct glyph_table
+{
+    uint8_t     *Metadata;
+    glyph_entry *Buckets;
+    glyph_entry  Sentinel;
+
+    uint64_t GroupWidth;
+    uint64_t GroupCount;
+    uint64_t HashMask;
+};
+
+constexpr uint8_t GlyphTableEmptyMask = 1 << 0;
+constexpr uint8_t GlyphTableDeadMask  = 1 << 1;
+constexpr uint8_t GlyphTableTagMask   = 0xFF & ~0x03;
+
+static bool
+IsValidGlyphTable(glyph_table *Table)
+{
+    bool Result = (Table) && (Table->Metadata) && (Table->Buckets);
+    return Result;
+}
+
+static glyph_entry *
+GetGlyphEntry(uint64_t Index, glyph_table *Table)
+{
+    glyph_entry *Result = 0;
+    return Result;
+}
+
+static uint64_t
+GetFreeGlyphEntry(glyph_table *Table)
+{
+    uint64_t Result = 0;
+    return Result;
+}
+
+static uint64_t
+GetGlyphGroupIndexFromHash(glyph_hash Hash, glyph_table *Table)
+{
+    uint64_t Result = 0;
+    return Result;
+}
+
+static glyph_tag
+GetGlyphTagFromHash(glyph_hash Hash)
+{
+    glyph_tag Result = {};
+    return Result;
+}
+
+static bool
+GlyphHashesAreEqual(glyph_hash A, glyph_hash B)
+{
+    bool Result = 1;
+    return Result;
+}
+
+static glyph_entry *
+FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
+{
+    glyph_entry *Result     = 0;
+    uint64_t     EntryIndex = 0;
+
+    uint64_t ProbeCount = 0;
+    uint64_t GroupIndex = GetGlyphGroupIndexFromHash(Hash, Table);
+
+    while(true)
+    {
+        uint8_t  *Meta = Table->Metadata + (GroupIndex * Table->GroupWidth);
+        glyph_tag Tag  = GetGlyphTagFromHash(Hash);
+
+        __m128i MetaVector = _mm_loadu_si128((__m128i *)Meta);
+        __m128i TagVector  = _mm_set1_epi8(Tag.Value);
+
+        // Uses a 6 bit tags to search a matching tag through the meta-data vector.
+        // If found compare hashes and return if they match.
+
+        int TagMask = _mm_movemask_epi8(_mm_cmpeq_epi8(MetaVector, TagVector));
+        while(TagMask)
+        {
+            EntryIndex = FindFirstBit(TagMask) + (GroupIndex * Table->GroupWidth);
+
+            glyph_entry *Entry = GetGlyphEntry(EntryIndex, Table);
+            if(GlyphHashesAreEqual(Hash, Entry->Hash))
+            {
+                Result = Entry;
+                break;
+            }
+
+            TagMask &= TagMask - 1;
+        }
+
+        if(!Result)
+        {
+            __m128i EmptyVector = _mm_set1_epi8(GlyphTableEmptyMask);
+            int     EmptyMask   = _mm_movemask_epi8(_mm_cmpeq_epi8(MetaVector, EmptyVector));
+
+            if(!EmptyMask)
+            {
+                ProbeCount++;
+                GroupIndex = (GroupIndex + (ProbeCount * ProbeCount)) & (Table->GroupCount - 1);
+            }
+            else
+            {
+                break;
+            }
+        }
+    }
+
+    if(Result)
+    {
+        // An existing entry was found, we simply pop it from the chain.
+
+        glyph_entry *Prev = GetGlyphEntry(Result->PrevLRU, Table);
+        glyph_entry *Next = GetGlyphEntry(Result->NextLRU, Table);
+
+        Prev->NextLRU = Result->NextLRU;
+        Next->PrevLRU = Result->PrevLRU;
+    }
+    else
+    {
+        // No existing entry was found, allocate a new one and link it into the chain.
+
+        // WARN:
+        // We are missing the allocation part. We have to mark it.
+        // We have the entry index so.. We just have to compute the tag and clear
+        // relevant bits inside the metadata?
+
+        uint64_t EntryIndex = GetFreeGlyphEntry(Table);
+        NTEXT_ASSERT(EntryIndex);
+
+        Result = GetGlyphEntry(EntryIndex, Table);
+        Result->Hash = Hash;
+    }
+
+    glyph_entry *Sentinel = &Table->Sentinel;
+    Result->NextLRU = Sentinel->NextLRU;
+    Result->PrevLRU = 0;
+
+    glyph_entry *LastNext = GetGlyphEntry(Sentinel->NextLRU, Table);
+    LastNext->PrevLRU = EntryIndex;
+    Sentinel->NextLRU = EntryIndex;
+
+    return Result;
 }
 
 // ====================================================================================
