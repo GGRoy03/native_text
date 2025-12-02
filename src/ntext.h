@@ -1,4 +1,4 @@
-// ====================================================================================
+// ==================================================================================
 // @Internal : Includes & Context Cracking
 
 #include <immintrin.h>
@@ -12,13 +12,13 @@
 #endif
 
 #if defined(_MSV_VER)
-#define NTEXT_MSVC 1
+    #define NTEXT_MSVC 1
 #elif defined(__clang__)
-#define NTEXT_CLANG 1
+    #define NTEXT_CLANG 1
 #elif defined(__GNUC__)
-#define NTEXT_GNU 1
+    #define NTEXT_GNU 1
 #else
-#error "Unknown Compiler"
+    #error "Unknown Compiler"
 #endif
 
 #if NTEXT_MSVC
@@ -43,9 +43,9 @@ static inline unsigned FindFirstBit(uint32_t Mask)
 #endif
 
 #if NTEXT_MSVC || NTEXT_CLANG
-#define AlignOf(T) __alignof(T)
+    #define AlignOf(T) __alignof(T)
 #elif NTEXT_GNU
-#define AlignOf(T) __alignof(T)__
+    #define AlignOf(T) __alignof(T)__
 #else
     #error "AlignOf not supported for this compiler"
 #endif
@@ -142,108 +142,6 @@ LeaveMemoryRegion(memory_region Region)
 #define PushArrayAligned(a, T, c, align) PushArrayNoZeroAligned(a, T, c, align)
 #define PushArray(a, T, c) PushArrayAligned(a, T, c, max(8, AlignOf(T)))
 #define PushStruct(a, T)   PushArrayAligned(a, T, 1, max(8, AlignOf(T)))
-
-// ===================================================================================
-// @Public : NText UTF8 Handling
-
-struct utf8_string
-{
-    char *Data;
-    uint64_t Size;
-};
-
-struct unicode_decode
-{
-    uint32_t Increment;
-    uint32_t Codepoint;
-};
-
-static uint8_t UTF8ByteClass[32] =
-{
-  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,2,2,2,2,3,3,4,5,
-};
-
-// Decoding the byte class
-// 0xxx xxxx >> 3 == 0000 xxxx | Range = 0..15  (ASCII)
-// 10xx xxxx >> 3 == 0001 0xxx | Range = 16..23 (ContByte/Invalid)
-// 110x xxxx >> 3 == 0001 10xx | Range = 24..27 (2 bytes)
-// 1110 xxxx >> 3 == 0001 110x | Range = 28..29 (3 bytes)
-// 1111 0xxx >> 3 == 0001 1110 | Range = 30     (4 bytes)
-// 1111 1xxx >> 3 == 0001 1111 | Range = 32     (Invalid)
-
-// Decoding code point (x represents payload).
-// Always mask payload size in byte and shift by sum of cont bytes payload size.
-// 1 byte -> 0xxx xxxx                               -> Code Point == (Byte0)
-// 2 byte -> 110x xxxx 10yy yyyy                     -> Code Point == (Byte0 & BitMask5) << 6  | (Byte1 & BitMask6)
-// 3 byte -> 1110 xxxx 10yy yyyy 10zz zzzz           -> Code Point == (Byte0 & BitMask4) << 12 | (Byte1 & BitMask6) << 6  | (Byte2 & BitMask6)
-// 4 byte -> 1111 1xxx 10yy yyyy 10zz zzzz 10ww wwww -> Code Point == (Byte0 & BitMask3) << 18 | (Byte1 & BitMask6) << 12 | (Byte2 & BitMask6) << 6 | (Byte3 & BitMask6)
-
-static unicode_decode
-DecodeUTF8(uint8_t *String, uint64_t Maximum)
-{
-    unicode_decode Result = { 1, _UI32_MAX };
-
-    uint8_t Byte = String[0];
-    uint8_t ByteClass = UTF8ByteClass[Byte >> 3];
-
-    switch (ByteClass)
-    {
-
-    case 1:
-    {
-        Result.Codepoint = Byte;
-    } break;
-
-    case 2:
-    {
-        if (1 < Maximum)
-        {
-            uint8_t ContByte = String[1];
-            if (UTF8ByteClass[ContByte >> 3] == 0)
-            {
-                Result.Codepoint = (Byte & 0b00011111) << 6;
-                Result.Codepoint |= (ContByte & 0b00111111) << 0;
-                Result.Increment = 2;
-            }
-        }
-    } break;
-
-    case 3:
-    {
-        if (2 < Maximum)
-        {
-            uint8_t ContByte[2] = { String[1], String[2] };
-            if (UTF8ByteClass[ContByte[0] >> 3] == 0 && UTF8ByteClass[ContByte[1] >> 3] == 0)
-            {
-                Result.Codepoint = ((Byte & 0b00001111) << 12);
-                Result.Codepoint |= ((ContByte[0] & 0b00111111) << 6);
-                Result.Codepoint |= ((ContByte[1] & 0b00111111) << 0);
-                Result.Increment = 3;
-            }
-        }
-    } break;
-
-    case 4:
-    {
-        if (3 < Maximum)
-        {
-            uint8_t ContByte[3] = { String[1], String[2], String[3] };
-            if (UTF8ByteClass[ContByte[0] >> 3] == 0 && UTF8ByteClass[ContByte[1] >> 3] == 0 && UTF8ByteClass[ContByte[2] >> 3] == 0)
-            {
-                Result.Codepoint = (Byte & 0b00000111) << 18;
-                Result.Codepoint |= (ContByte[0] & 0b00111111) << 12;
-                Result.Codepoint |= (ContByte[1] & 0b00111111) << 6;
-                Result.Codepoint |= (ContByte[2] & 0b00111111) << 0;
-                Result.Increment = 4;
-            }
-        }
-    } break;
-
-    }
-
-    return Result;
-}
-
 
 // ====================================================================================
 // @Internal : Win32 Implementation
@@ -402,7 +300,6 @@ TryRasterizeAndDump(os_context Context, memory_arena *Arena)
     }
 
     DWRITE_GLYPH_OFFSET *Offsets = (DWRITE_GLYPH_OFFSET *)PushArray(Arena, DWRITE_GLYPH_OFFSET, GlyphCount);
-
     for(UINT32 Idx = 0; Idx < GlyphCount; ++Idx)
     {
         Offsets[Idx].advanceOffset  = 0.0f;
@@ -692,10 +589,6 @@ struct glyph_tag
     uint8_t Value;
 };
 
-// NOTE:
-// Now that I think about it, we kind of have to implement some shaping and whatnot.
-// Since I have to shape the glyph.
-
 struct glyph_entry
 {
     glyph_hash Hash;
@@ -703,7 +596,13 @@ struct glyph_entry
     uint64_t PrevLRU;
     uint64_t NextLRU;
 
-    bool IsRasterized;
+    uint16_t GlyphIndex;
+    float    SizeX;
+    float    SizeY;
+    float    Advance;
+    float    OffsetX;
+    float    OffsetY;
+    bool     IsRasterized; // NOTE: Prefer state?
 };
 
 struct glyph_table
@@ -721,6 +620,14 @@ struct glyph_state
 {
     uint64_t Id;
     bool     IsRasterized;
+};
+
+struct shaped_glyph
+{
+    uint16_t GlyphIndex;
+    float    Advance;
+    float    OffsetX;
+    float    OffsetY;
 };
 
 constexpr uint8_t GlyphTableEmptyMask = 1 << 0;
@@ -759,28 +666,65 @@ GetGlyphGroupIndexFromHash(glyph_hash Hash, glyph_table *Table)
     return Result;
 }
 
-// WARN:
-// Still don't know enough about hashes.
+// NOTE:
+// I have no idea what this is. It is taken directly from refterm. Casey mentions tha
+// the hash might not be the best, but I don't know any better. Let's stick with
+// this for now.
+
+static char unsigned OverhangMask[32] =
+{
+    255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255,  255, 255, 255, 255,
+    0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0
+};
+
+static char unsigned DefaultSeed[16] =
+{
+    178, 201, 95, 240, 40, 41, 143, 216,
+    2, 209, 178, 114, 232, 4, 176, 188
+};
 
 static glyph_hash
-ComputeGlyphHash(utf8_string String)
+ComputeGlyphHash(size_t Count, char unsigned *At, char unsigned *Seedx16)
 {
-    glyph_hash Result = {};
+    glyph_hash Result = {0};
 
-    uint64_t FNVOffset = 0xcbf29ce484222325ULL;
-    uint64_t FNVPrime  = 0x100000001b3ULL;
+    __m128i HashValue = _mm_cvtsi64_si128(Count);
+    HashValue = _mm_xor_si128(HashValue, _mm_loadu_si128((__m128i *)Seedx16));
 
-    uint64_t Hash = FNVOffset;
-    for (uint64_t Idx = 0; Idx < String.Size; ++Idx)
+    size_t ChunkCount = Count / 16;
+    while(ChunkCount--)
     {
-        Hash ^= (uint64_t)String.Data[Idx];
-        Hash *= FNVPrime;
+        __m128i In = _mm_loadu_si128((__m128i *)At);
+        At += 16;
+
+        HashValue = _mm_xor_si128(HashValue, In);
+        HashValue = _mm_aesdec_si128(HashValue, _mm_setzero_si128());
+        HashValue = _mm_aesdec_si128(HashValue, _mm_setzero_si128());
+        HashValue = _mm_aesdec_si128(HashValue, _mm_setzero_si128());
+        HashValue = _mm_aesdec_si128(HashValue, _mm_setzero_si128());
     }
 
-    uint64_t LowAndHigh[2];
-    LowAndHigh[0] = Hash;
-    LowAndHigh[1] = String.Size;
-    memcpy(&Result.Value, LowAndHigh, sizeof(LowAndHigh));
+    size_t Overhang = Count % 16;
+
+    // NOTE:
+    // I feel like I remember seeing a fix for this? Need to check.
+
+#if 0
+    __m128i In = _mm_loadu_si128((__m128i *)At);
+#else
+    char Temp[16];
+    __movsb((unsigned char *)Temp, At, Overhang);
+    __m128i In = _mm_loadu_si128((__m128i *)Temp);
+#endif
+    In = _mm_and_si128(In, _mm_loadu_si128((__m128i *)(OverhangMask + 16 - Overhang)));
+
+    HashValue = _mm_xor_si128(HashValue, In);
+    HashValue = _mm_aesdec_si128(HashValue, _mm_setzero_si128());
+    HashValue = _mm_aesdec_si128(HashValue, _mm_setzero_si128());
+    HashValue = _mm_aesdec_si128(HashValue, _mm_setzero_si128());
+    HashValue = _mm_aesdec_si128(HashValue, _mm_setzero_si128());
+
+    Result.Value = HashValue;
 
     return Result;
 }
@@ -970,7 +914,9 @@ enum class TextureFormat
 
 struct collection_item
 {
-    utf8_string String;
+    char    *Data;
+    uint64_t Count;
+    bool     ContainsComplex;
 };
 
 struct collection_node
@@ -987,6 +933,9 @@ struct collection
 
     TextureFormat    Format;
     rectangle_packer Packer; // NOTE: Pointer?
+
+    void AddItem(char *String      , size_t Count, context &Context);
+    void AddItem(const char *String, size_t Count, context &Context);
 };
 
 static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
@@ -1025,40 +974,77 @@ static collection OpenCollection(TextureFormat Format)
     return Collection;
 }
 
-static void
-PushStringInCollection(char *String, uint64_t Size, collection &Collection, context &Context)
+void collection::AddItem(const char *Data, size_t Count, context &Context)
 {
-    collection_node *Node = PushStruct(Context.Arena, collection_node);
-    if(Node)
-    {
-        Node->Value.String.Data = String;
-        Node->Value.String.Size = Size;
-
-        if(!Collection.First)
-        {
-            Collection.First = Node;
-        }
-
-        if(Collection.Last)
-        {
-            Collection.Last->Next = Node;
-        }
-
-        Collection.Last = Node;
-    }
+    collection::AddItem((char *)Data, Count, Context);
 }
 
-static void
-PushStringInCollection(const char *String, uint64_t Size, collection &Collection, context &Context)
+void collection::AddItem(char *Data, size_t Count, context &Context)
 {
-    PushStringInCollection((char *)String, Size, Collection, Context);
+    collection_item Item = {.Data = Data, .Count = Count};
+
+    uint32_t Advance     = 16;
+    __m128i  ComplexByte = _mm_set1_epi8(0x80);
+
+    while(Count)
+    {
+        __m128i ContainsComplex = _mm_setzero_si128();
+
+        while(Count >= Advance)
+        {
+            __m128i Batch = _mm_loadu_si128((__m128i *) Data);
+            __m128i TestX = _mm_and_si128(Batch, ComplexByte);
+
+            // NOTE: If we break early, is there a better instruction than a OR?
+            ContainsComplex = _mm_or_si128(ContainsComplex, TestX);
+            if(_mm_movemask_epi8(ContainsComplex))
+            {
+                break;
+            }
+
+            Count -= Advance;
+            Data  += Advance;
+        }
+
+        Item.ContainsComplex = _mm_movemask_epi8(ContainsComplex);
+        if(Item.ContainsComplex)
+        {
+            break;
+        }
+
+        char Token = Data[0];
+        if(Token < 0)
+        {
+            Item.ContainsComplex = 1;
+            break;
+        }
+
+        Data++;
+        Count--;
+    }
+
+    collection_node *Node = PushStruct(Context.Arena, collection_node);
+    if (Node)
+    {
+        Node->Value = Item;
+
+        if (!this->First)
+        {
+            this->First = Node;
+        }
+
+        if (this->Last)
+        {
+            this->Last->Next = Node;
+        }
+
+        this->Last = Node;
+    }
 }
 
 static void
 CloseCollection(collection &Collection, context &Context)
 {
-    TryRasterizeAndDump(Context.OS, Context.Arena);
-
     switch(Context.TextStorage)
     {
 
@@ -1066,15 +1052,23 @@ CloseCollection(collection &Collection, context &Context)
     {
         for(collection_node *Node = Collection.First; Node != 0; Node = Node->Next)
         {
-            glyph_hash  Hash  = ComputeGlyphHash(Node->Value.String);
-            glyph_state State = FindGlyphEntryByHash(Hash, 0);
-            if(!State.IsRasterized)
+            collection_item Item = Node->Value;
+
+            if(!Item.ContainsComplex)
             {
-                // TODO:
-                // 1) Get Glyph Information
-                // 2) Allocate into context
-                // 3) Rasterize
-                // 4) Update Map
+                for(uint64_t Idx = 0; Idx < Item.Count; ++Idx)
+                {
+                    glyph_hash  Hash  = ComputeGlyphHash(1, (char unsigned *) &Item.Data[Idx], DefaultSeed);
+                    glyph_state State = FindGlyphEntryByHash(Hash, 0);
+                    if(!State.IsRasterized)
+                    {
+                        // TODO: Rasterize and whatnot. Need to shape first.
+                    }
+                }
+            }
+            else
+            {
+                NTEXT_ASSERT(!"Not Implemented");
             }
         }
     } break;
