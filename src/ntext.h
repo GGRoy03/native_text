@@ -847,27 +847,28 @@ enum class TextStorage
     LazyAtlas = 1,
 };
 
-struct ntext_params
+struct glyph_generator_params
 {
     TextStorage TextStorage;
     uint64_t    FrameMemoryBudget;
     void       *FrameMemory;
 };
 
-struct context
+struct glyph_generator
 {
     TextStorage   TextStorage;
     memory_arena *Arena;
     os_context    OS;
+    glyph_table  *GlyphTable;
 };
 
-static context CreateContext(ntext_params Params)
+static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
 {
-    context Context = {};
+    glyph_generator Generator = {};
 
     if(Params.FrameMemoryBudget == 0 || Params.FrameMemory == 0 || Params.TextStorage == TextStorage::None)
     {
-        return Context;
+        return Generator;
     }
 
     // Arena Initialization
@@ -875,30 +876,30 @@ static context CreateContext(ntext_params Params)
         NTEXT_ASSERT(Params.FrameMemory);
         NTEXT_ASSERT(Params.FrameMemoryBudget);
 
-        Context.Arena = static_cast<memory_arena *>(Params.FrameMemory);
-        Context.Arena->Reserved     = Params.FrameMemoryBudget;
-        Context.Arena->BasePosition = 0;
-        Context.Arena->Position     = sizeof(memory_arena);
+        Generator.Arena = static_cast<memory_arena *>(Params.FrameMemory);
+        Generator.Arena->Reserved     = Params.FrameMemoryBudget;
+        Generator.Arena->BasePosition = 0;
+        Generator.Arena->Position     = sizeof(memory_arena);
     }
 
     // Constant Forwarding
     {
         NTEXT_ASSERT(Params.TextStorage != TextStorage::None);
 
-        Context.TextStorage = Params.TextStorage;
+        Generator.TextStorage = Params.TextStorage;
     }
 
     // OS Initialization
     {
-        Context.OS = CreateOSContext();
+        Generator.OS = CreateOSContext();
     }
 
-    return Context;
+    return Generator;
 }
 
-static bool IsValidContext(context &Context)
+static bool IsValidGlyphGenerator(const glyph_generator &GlyphGenerator)
 {
-    bool Result = (Context.Arena != 0);
+    bool Result = (GlyphGenerator.Arena != 0);
     return Result;
 }
 
@@ -910,32 +911,6 @@ enum class TextureFormat
     None      = 0,
     RGBA      = 1,
     GreyScale = 2,
-};
-
-struct collection_item
-{
-    char    *Data;
-    uint64_t Count;
-    bool     ContainsComplex;
-};
-
-struct collection_node
-{
-    collection_node *Next;
-    collection_item  Value;
-};
-
-struct collection
-{
-    collection_node *First;
-    collection_node *Last;
-    uint32_t         Count;
-
-    TextureFormat    Format;
-    rectangle_packer Packer; // NOTE: Pointer?
-
-    void AddItem(char *String      , size_t Count, context &Context);
-    void AddItem(const char *String, size_t Count, context &Context);
 };
 
 static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
@@ -961,30 +936,19 @@ static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
     }
 }
 
-static collection OpenCollection(TextureFormat Format)
+static void
+FillAtlas(const char *Data, uint64_t Count, glyph_generator &Generator)
 {
-    collection Collection =
-    {
-        .First  = 0,
-        .Last   = 0,
-        .Count  = 0,
-        .Format = Format,
-    };
-
-    return Collection;
+    FillAtlas((char *)Data, Count, Generator);
 }
 
-void collection::AddItem(const char *Data, size_t Count, context &Context)
+static void
+FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 {
-    collection::AddItem((char *)Data, Count, Context);
-}
-
-void collection::AddItem(char *Data, size_t Count, context &Context)
-{
-    collection_item Item = {.Data = Data, .Count = Count};
-
     uint32_t Advance     = 16;
     __m128i  ComplexByte = _mm_set1_epi8(0x80);
+
+    bool HasComplexCharacter = false;
 
     while(Count)
     {
@@ -995,7 +959,10 @@ void collection::AddItem(char *Data, size_t Count, context &Context)
             __m128i Batch = _mm_loadu_si128((__m128i *) Data);
             __m128i TestX = _mm_and_si128(Batch, ComplexByte);
 
-            // NOTE: If we break early, is there a better instruction than a OR?
+            // NOTE:
+            // If we break early, is there a better instruction than a OR?
+            // This is not great.
+
             ContainsComplex = _mm_or_si128(ContainsComplex, TestX);
             if(_mm_movemask_epi8(ContainsComplex))
             {
@@ -1006,8 +973,8 @@ void collection::AddItem(char *Data, size_t Count, context &Context)
             Data  += Advance;
         }
 
-        Item.ContainsComplex = _mm_movemask_epi8(ContainsComplex);
-        if(Item.ContainsComplex)
+        HasComplexCharacter = _mm_movemask_epi8(ContainsComplex);
+        if(HasComplexCharacter)
         {
             break;
         }
@@ -1015,7 +982,7 @@ void collection::AddItem(char *Data, size_t Count, context &Context)
         char Token = Data[0];
         if(Token < 0)
         {
-            Item.ContainsComplex = 1;
+            HasComplexCharacter = 1;
             break;
         }
 
@@ -1023,61 +990,24 @@ void collection::AddItem(char *Data, size_t Count, context &Context)
         Count--;
     }
 
-    collection_node *Node = PushStruct(Context.Arena, collection_node);
-    if (Node)
+    // BUG:
+    // Data and count are modified. Need to use other variables in the code above.
+
+    if(HasComplexCharacter)
     {
-        Node->Value = Item;
-
-        if (!this->First)
-        {
-            this->First = Node;
-        }
-
-        if (this->Last)
-        {
-            this->Last->Next = Node;
-        }
-
-        this->Last = Node;
+        NTEXT_ASSERT(!"Not Implemented");
     }
-}
-
-static void
-CloseCollection(collection &Collection, context &Context)
-{
-    switch(Context.TextStorage)
+    else
     {
-
-    case TextStorage::LazyAtlas:
-    {
-        for(collection_node *Node = Collection.First; Node != 0; Node = Node->Next)
+        for(uint32_t Idx = 0; Idx < Count; ++Idx)
         {
-            collection_item Item = Node->Value;
+            glyph_hash  Hash  = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
+            glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
 
-            if(!Item.ContainsComplex)
+            if(!State.IsRasterized)
             {
-                for(uint64_t Idx = 0; Idx < Item.Count; ++Idx)
-                {
-                    glyph_hash  Hash  = ComputeGlyphHash(1, (char unsigned *) &Item.Data[Idx], DefaultSeed);
-                    glyph_state State = FindGlyphEntryByHash(Hash, 0);
-                    if(!State.IsRasterized)
-                    {
-                        // TODO: Rasterize and whatnot. Need to shape first.
-                    }
-                }
-            }
-            else
-            {
-                NTEXT_ASSERT(!"Not Implemented");
             }
         }
-    } break;
-
-    case TextStorage::None:
-    {
-        NTEXT_ASSERT(!"Invalid State");
-    } break;
-
     }
 }
 

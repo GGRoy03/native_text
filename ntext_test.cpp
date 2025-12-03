@@ -1,49 +1,107 @@
 #include "src/ntext.h"
 
-// TODO:
-// Figure out how to represent utf-8. Without too much friction.
+#define ASSERT(Cond) do {if (!(Cond)) __assume(0);} while (0)
 
-// NOTE:
-// The API is still quite shaky. Unsure about this whole bitmap stuff
-// (Pointer vs stack). I mean, it's mostly a persistent data makes no sense to keep
-// on stack? I think it's fine. Just maybe the internals are weird?
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <windowsx.h>
+#include <shlwapi.h>
+#include <imm.h>
 
-// WARN:
-// I have found a major weakness for this API:
-// We persist a full bitmap in memory. A simple greyscale 1024x1024 is 1 mib of
-// memory. Most of this memory is actually useless. Uhm. This is quite a big problem.
+#pragma comment(lib, "user32")
+#pragma comment(lib, "dwrite")
+#pragma comment(lib, "d2d1")
+#pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "GDI32.lib")
 
-// WARN:
-// So my solution was that, we just use bitmaps as the output of CloseCollection
-// you basically receive an array of bitmaps to copy. Simple. But what about
-// memory spikes, meaning a frame that has a big spike in memory usage, this will
-// overflow the arena. But I mean, I can make that user controlled quite easily.
+static LRESULT CALLBACK
+Win32Proc(HWND Handle, UINT Message, WPARAM WParam, LPARAM LParam)
+{
+    switch(Message)
+    {
+
+    case WM_CLOSE:
+    {
+        DestroyWindow(Handle);
+        return 0;
+    } break;
+
+    case WM_DESTROY:
+    {
+        PostQuitMessage(0);
+        return 0;
+    } break;
+
+    }
+
+    return DefWindowProc(Handle, Message, WParam, LParam);
+}
+
+static HWND
+Win32Init(float Width, float Height)
+{
+    WNDCLASSEX WindowClass = { 0 };
+    WindowClass.cbSize        = sizeof(WNDCLASSEX);
+    WindowClass.style         = CS_HREDRAW | CS_VREDRAW;
+    WindowClass.lpfnWndProc   = Win32Proc;
+    WindowClass.hInstance     = GetModuleHandle(0);
+    WindowClass.hIcon         = LoadIcon(0, IDI_APPLICATION);
+    WindowClass.hCursor       = LoadCursor(0, IDC_ARROW);
+    WindowClass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 2);
+    WindowClass.lpszMenuName  = 0;
+    WindowClass.lpszClassName = "Stub Window";
+    WindowClass.hIconSm       = LoadIcon(0, IDI_APPLICATION);
+
+    if(!RegisterClassEx(&WindowClass))
+    {
+        MessageBox(0, "Error registering class", "Error", MB_OK | MB_ICONERROR);
+        return 0;
+    }
+
+    HWND Handle = CreateWindowEx(0, WindowClass.lpszClassName,
+                                 "Native Text", WS_OVERLAPPEDWINDOW,
+                                 0, 0, Width, Height,
+                                 0, 0, WindowClass.hInstance, 0);
+    ShowWindow(Handle, SW_SHOWNORMAL);
+
+    return Handle;
+}
+
+static void
+Win32Sleep(DWORD Time)
+{
+    Sleep(Time);
+}
+
+#include "./renderers/d3d11/d3d11.h"
 
 int main()
 {
-    ntext::ntext_params ContextParams =
+    HWND HWindow = Win32Init(1920, 1080);
+
+    d3d11_renderer Renderer;
+    Renderer.Init(HWindow, 1920, 1080);
+
+    while(true)
     {
-        .TextStorage       = ntext::TextStorage::LazyAtlas,
-        .FrameMemoryBudget = 1024 * 10 * 10,
-        .FrameMemory       = malloc(1024 * 10),
-    };
-    ntext::context Context = CreateContext(ContextParams);
+        MSG Message;
+        while(PeekMessage(&Message, 0, 0, 0, PM_REMOVE))
+        {
+            if(Message.message == WM_QUIT)
+            {
+                goto END;
+            }
 
-    if(ntext::IsValidContext(Context))
-    {
-        // NOTE:
-        // We would open some collection with a 2D allocator and a format.
-        // Then we can easily rasterize a list of CPU buffers with no knowledge of anything else.
-        // A collection is probably also a font, but what is TBD.
+            TranslateMessage(&Message);
+            DispatchMessage(&Message);
+        }
 
-        ntext::collection Collection = ntext::OpenCollection(ntext::TextureFormat::GreyScale);
+        Renderer.Clear(0.f, 0.f, 0.f, 1.f);
+        Renderer.Present();
 
-        Collection.AddItem("abc", sizeof("abc") - 1, Context);
-
-        // NOTE:
-        // Iterate Collection -> Check if we need to do anything -> Rasterize -> Allocate Into Bitmap -> Return List of copies.
-        ntext::CloseCollection(Collection, Context);
+        Win32Sleep(5);
     }
 
+END:
     return 0;
 }
