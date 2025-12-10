@@ -72,7 +72,7 @@ void d3d11_renderer::Init(void *WindowHandle, int Width, int Height)
 
     ASSERT(this->SwapChain);
 
-    this->Device->CreateVertexShader(D3D11VtxShaderBytes, sizeof(D3D11PxlShaderBytes), 0, &this->VtxShader);
+    this->Device->CreateVertexShader(D3D11VtxShaderBytes, sizeof(D3D11VtxShaderBytes), 0, &this->VtxShader);
     this->Device->CreatePixelShader(D3D11PxlShaderBytes, sizeof(D3D11PxlShaderBytes), 0, &this->PxlShader);
 
     ASSERT(this->VtxShader);

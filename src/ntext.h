@@ -1,5 +1,7 @@
 // ==================================================================================
 // @Internal : Includes & Context Cracking
+// Placeholder: include and platform detection section
+// ==================================================================================
 
 #include <immintrin.h>
 #include <stdint.h>
@@ -29,6 +31,7 @@ static inline unsigned FindFirstBit(uint32_t Mask)
     return _tzcnt_u32(Mask);
 }
 
+
 #elif NTEXT_CLANG || NTEXT_GNU
 
 
@@ -37,6 +40,7 @@ static inline unsigned FindFirstBit(uint32_t Mask)
     NTEXT_ASSERT(Mask != 0);
     return __builtin_ctz(Mask);
 }
+
 
 #else
     #error "FindFirstBit not supported for this compiler."
@@ -67,8 +71,10 @@ static inline unsigned FindFirstBit(uint32_t Mask)
 namespace ntext
 {
 
-// ====================================================================================
+// ==================================================================================
 // @Internal : Various Utilities
+// Placeholder: memory arena and helpers
+// ==================================================================================
 
 struct memory_arena
 {
@@ -77,11 +83,13 @@ struct memory_arena
     uint64_t Position;
 };
 
-typedef struct memory_region
+
+struct memory_region
 {
     memory_arena *Arena;
     uint64_t      Position;
-} memory_region;
+};
+
 
 static void *
 PushArena(memory_arena *Arena, uint64_t Size, uint64_t Alignment)
@@ -109,11 +117,13 @@ PushArena(memory_arena *Arena, uint64_t Size, uint64_t Alignment)
     return Result;
 }
 
+
 static void
 ClearArena(memory_arena *Arena)
 {
     Arena->Position = sizeof(memory_arena);
 }
+
 
 static uint64_t
 GetArenaPosition(memory_arena *Arena)
@@ -121,6 +131,7 @@ GetArenaPosition(memory_arena *Arena)
     uint64_t Result = Arena->BasePosition + Arena->Position;
     return Result;
 }
+
 
 static memory_region
 EnterMemoryRegion(memory_arena *Arena)
@@ -132,19 +143,24 @@ EnterMemoryRegion(memory_arena *Arena)
     return Result;
 }
 
+
 static void
 LeaveMemoryRegion(memory_region Region)
 {
     Region.Arena->Position = Region.Position;
 }
 
+
 #define PushArrayNoZeroAligned(a, T, c, align) (T *)PushArena((a), sizeof(T)*(c), (align))
 #define PushArrayAligned(a, T, c, align) PushArrayNoZeroAligned(a, T, c, align)
 #define PushArray(a, T, c) PushArrayAligned(a, T, c, max(8, AlignOf(T)))
 #define PushStruct(a, T)   PushArrayAligned(a, T, 1, max(8, AlignOf(T)))
 
-// ====================================================================================
+
+// ==================================================================================
 // @Internal : Win32 Implementation
+// Placeholder: DirectWrite integration & rasterization helpers
+// ==================================================================================
 
 #ifdef NTEXT_WIN32
 
@@ -207,14 +223,29 @@ static bool WriteGrayscaleBMP(const wchar_t *path, int w, int h, BYTE *Pixels)
     return true;
 }
 
-// NOTE:
-// This is not quite correct, because we do not want to force certain fonts. But I need to test a bunch of things.
+
+struct os_glyph_info
+{
+    uint16_t GlyphIndex;
+
+    float Advance;
+    float OffsetX;
+    float OffsetY;
+
+    float SizeX;
+    float SizeY;
+};
+
 
 struct os_context
 {
+public:
+    os_glyph_info FindGlyphInformation(uint32_t CodePointer, float FontSize);
+
     IDWriteFactory  *DirectWrite;
     IDWriteFontFace *Font;
 };
+
 
 static os_context CreateOSContext(void)
 {
@@ -256,11 +287,52 @@ static os_context CreateOSContext(void)
     return Context;
 }
 
+
 static bool IsValidOSContext(os_context Context)
 {
     bool Result = (Context.DirectWrite) && (Context.Font);
     return Result;
 }
+
+
+os_glyph_info os_context::FindGlyphInformation(uint32_t CodePoint, float EmSize)
+{
+    HRESULT Hr = S_OK;
+
+    IDWriteFontFace *FontFace = this->Font;
+    IDWriteFactory  *DWrite   = this->DirectWrite;
+
+    UINT16 GlyphIndex = 0;
+    Hr = FontFace->GetGlyphIndices(&CodePoint, 1, &GlyphIndex);
+
+    DWRITE_GLYPH_METRICS GlyphMetrics = {};
+    Hr = FontFace->GetDesignGlyphMetrics(&GlyphIndex, 1, &GlyphMetrics, FALSE);
+
+    DWRITE_FONT_METRICS FontMetrics = {};
+    FontFace->GetMetrics(&FontMetrics);
+
+    float Scale = (FontMetrics.designUnitsPerEm > 0) ? (EmSize / (float)FontMetrics.designUnitsPerEm) : 1.0f;
+
+    int32_t  Left    = GlyphMetrics.leftSideBearing;
+    uint32_t Advance = GlyphMetrics.advanceWidth;
+    int32_t  Right   = GlyphMetrics.rightSideBearing;
+    int32_t  Top     = GlyphMetrics.topSideBearing;
+    uint32_t AHeight = GlyphMetrics.advanceHeight;
+    int32_t  Bottom  = GlyphMetrics.bottomSideBearing;
+
+    os_glyph_info Result =
+    {
+        .GlyphIndex = GlyphIndex,
+        .Advance    = static_cast<float>(Advance * Scale),
+        .OffsetX    = static_cast<float>(Left    * Scale),
+        .OffsetY    = static_cast<float>(Top     * Scale),
+        .SizeX      = static_cast<float>((Left   + Advance + Right)  * Scale),
+        .SizeY      = static_cast<float>((Top    + AHeight + Bottom) * Scale),
+    };
+
+    return Result;
+}
+
 
 static void
 TryRasterizeAndDump(os_context Context, memory_arena *Arena)
@@ -356,14 +428,18 @@ TryRasterizeAndDump(os_context Context, memory_arena *Arena)
 
 #endif // NTEXT_WIN32
 
-// ====================================================================================
+
+// ==================================================================================
 // @Internal : Rectangle Packing
+// Placeholder: rectangle packing utilities
+// ==================================================================================
 
 struct point
 {
     uint16_t X;
     uint16_t Y;
 };
+
 
 struct rectangle_packer
 {
@@ -372,6 +448,7 @@ struct rectangle_packer
     uint16_t  Width;
     uint16_t  Height;
 };
+
 
 struct packed_rectangle
 {
@@ -383,6 +460,7 @@ struct packed_rectangle
     bool     WasPacked;
 };
 
+
 struct rectangle
 {
     uint16_t Left;
@@ -390,6 +468,7 @@ struct rectangle
     uint16_t Right;
     uint16_t Bottom;
 };
+
 
 static uint64_t
 GetRectanglePackerFootprint(uint16_t Width)
@@ -399,6 +478,7 @@ GetRectanglePackerFootprint(uint16_t Width)
 
     return Result;
 }
+
 
 static rectangle_packer *
 CreateRectanglePacker(uint16_t Width, uint16_t Height, void *Memory)
@@ -420,6 +500,7 @@ CreateRectanglePacker(uint16_t Width, uint16_t Height, void *Memory)
 
     return Result;
 }
+
 
 static void
 PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
@@ -564,14 +645,18 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
     Rectangle.Y         = NewTopLeft.Y;
 }
 
-// ====================================================================================
-// @Public : NText Glyph Table Implementation
 
-enum class GlyphTableWidth
+// ==================================================================================
+// @Public : NText Glyph Table Implementation
+// Placeholder: glyph table types and hash utilities
+// ==================================================================================
+
+enum class GlyphTableWidth : uint64_t
 {
     None     = 0,
     _128Bits = 16,
 };
+
 
 struct glyph_table_params
 {
@@ -579,15 +664,26 @@ struct glyph_table_params
     uint64_t        GroupCount;
 };
 
+
 struct glyph_hash
 {
     __m128i Value;
 };
 
+
 struct glyph_tag
 {
     uint8_t Value;
 };
+
+
+struct glyph_layout_info
+{
+    float Advance;
+    float OffsetX;
+    float OffsetY;
+};
+
 
 struct glyph_entry
 {
@@ -596,14 +692,12 @@ struct glyph_entry
     uint64_t PrevLRU;
     uint64_t NextLRU;
 
-    uint16_t GlyphIndex;
-    float    SizeX;
-    float    SizeY;
-    float    Advance;
-    float    OffsetX;
-    float    OffsetY;
-    bool     IsRasterized; // NOTE: Prefer state?
+    uint16_t          GlyphIndex;
+    rectangle         Source;
+    glyph_layout_info LayoutInfo;
+    bool              IsRasterized;
 };
+
 
 struct glyph_table
 {
@@ -616,23 +710,21 @@ struct glyph_table
     uint64_t HashMask;
 };
 
+
 struct glyph_state
 {
-    uint64_t Id;
-    bool     IsRasterized;
+    uint64_t   Id;
+    uint16_t   GlyphIndex;
+    glyph_layout_info LayoutInfo;
+    rectangle  Source;
+    bool       IsRasterized;
 };
 
-struct shaped_glyph
-{
-    uint16_t GlyphIndex;
-    float    Advance;
-    float    OffsetX;
-    float    OffsetY;
-};
 
 constexpr uint8_t GlyphTableEmptyMask = 1 << 0;
 constexpr uint8_t GlyphTableDeadMask  = 1 << 1;
 constexpr uint8_t GlyphTableTagMask   = 0xFF & ~0x03;
+
 
 static bool
 IsValidGlyphTable(glyph_table *Table)
@@ -640,6 +732,7 @@ IsValidGlyphTable(glyph_table *Table)
     bool Result = (Table) && (Table->Metadata) && (Table->Buckets);
     return Result;
 }
+
 
 static glyph_entry *
 GetGlyphEntry(uint64_t Index, glyph_table *Table)
@@ -651,12 +744,14 @@ GetGlyphEntry(uint64_t Index, glyph_table *Table)
     return Result;
 }
 
+
 static uint64_t
 GetFreeGlyphEntry(glyph_table *Table)
 {
     uint64_t Result = 0;
     return Result;
 }
+
 
 static uint64_t
 GetGlyphGroupIndexFromHash(glyph_hash Hash, glyph_table *Table)
@@ -666,10 +761,6 @@ GetGlyphGroupIndexFromHash(glyph_hash Hash, glyph_table *Table)
     return Result;
 }
 
-// NOTE:
-// I have no idea what this is. It is taken directly from refterm. Casey mentions tha
-// the hash might not be the best, but I don't know any better. Let's stick with
-// this for now.
 
 static char unsigned OverhangMask[32] =
 {
@@ -677,11 +768,13 @@ static char unsigned OverhangMask[32] =
     0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0
 };
 
+
 static char unsigned DefaultSeed[16] =
 {
     178, 201, 95, 240, 40, 41, 143, 216,
     2, 209, 178, 114, 232, 4, 176, 188
 };
+
 
 static glyph_hash
 ComputeGlyphHash(size_t Count, char unsigned *At, char unsigned *Seedx16)
@@ -706,9 +799,6 @@ ComputeGlyphHash(size_t Count, char unsigned *At, char unsigned *Seedx16)
 
     size_t Overhang = Count % 16;
 
-    // NOTE:
-    // I feel like I remember seeing a fix for this? Need to check.
-
 #if 0
     __m128i In = _mm_loadu_si128((__m128i *)At);
 #else
@@ -729,6 +819,7 @@ ComputeGlyphHash(size_t Count, char unsigned *At, char unsigned *Seedx16)
     return Result;
 }
 
+
 static glyph_tag
 GetGlyphTagFromHash(glyph_hash Hash)
 {
@@ -736,12 +827,54 @@ GetGlyphTagFromHash(glyph_hash Hash)
     return Result;
 }
 
+
 static bool
 GlyphHashesAreEqual(glyph_hash A, glyph_hash B)
 {
     bool Result = 1;
     return Result;
 }
+
+
+static uint64_t
+GetGlyphTableFootprint(glyph_table_params Params)
+{
+    uint64_t SlotCount = Params.GroupCount * static_cast<uint32_t>(Params.GroupWidth);
+
+    uint64_t MetadataSize = SlotCount * sizeof(uint8_t);
+    uint64_t BucketsSize  = SlotCount * sizeof(glyph_entry);
+    uint64_t Result       = MetadataSize + BucketsSize + sizeof(glyph_table_params);
+
+    return Result;
+}
+
+
+static glyph_table *
+PlaceGlyphTableInMemory(glyph_table_params Params, void *Memory)
+{
+    glyph_table *Result = 0;
+
+    if(Memory)
+    {
+        uint64_t SlotCount = Params.GroupCount * static_cast<uint32_t>(Params.GroupWidth);
+
+        uint8_t     *Metadata = static_cast<uint8_t *>(Memory);
+        glyph_entry *Buckets  = reinterpret_cast<glyph_entry*>(Metadata + SlotCount);
+
+        Result = reinterpret_cast<glyph_table *>(Buckets + SlotCount);
+        Result->Metadata   = Metadata;
+        Result->Buckets    = Buckets;
+        Result->GroupWidth = static_cast<uint64_t>(Params.GroupWidth);
+        Result->GroupCount = Params.GroupCount;
+        Result->HashMask   = SlotCount - 1;
+
+        // TODO:
+        // Init sentinel
+    }
+
+    return Result;
+}
+
 
 static glyph_state
 FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
@@ -838,14 +971,18 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
     return State;
 }
 
+
 // ==================================================================================
 // @Public : NText Context
+// Placeholder: generator and context management
+// ==================================================================================
 
 enum class TextStorage
 {
     None      = 0,
     LazyAtlas = 1,
 };
+
 
 struct glyph_generator_params
 {
@@ -854,6 +991,7 @@ struct glyph_generator_params
     void       *FrameMemory;
 };
 
+
 struct glyph_generator
 {
     TextStorage   TextStorage;
@@ -861,6 +999,7 @@ struct glyph_generator
     os_context    OS;
     glyph_table  *GlyphTable;
 };
+
 
 static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
 {
@@ -882,6 +1021,22 @@ static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
         Generator.Arena->Position     = sizeof(memory_arena);
     }
 
+    // Glyph Table
+    {
+        glyph_table_params Params =
+        {
+            .GroupWidth = GlyphTableWidth::_128Bits,
+            .GroupCount = 64,
+        };
+
+        uint64_t Footprint = GetGlyphTableFootprint(Params);
+        void    *Memory    = PushArena(Generator.Arena, Footprint, AlignOf(void *));
+
+        Generator.GlyphTable = PlaceGlyphTableInMemory(Params, Memory);
+
+        NTEXT_ASSERT(Generator.GlyphTable);
+    }
+
     // Constant Forwarding
     {
         NTEXT_ASSERT(Params.TextStorage != TextStorage::None);
@@ -897,14 +1052,18 @@ static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
     return Generator;
 }
 
+
 static bool IsValidGlyphGenerator(const glyph_generator &GlyphGenerator)
 {
     bool Result = (GlyphGenerator.Arena != 0);
     return Result;
 }
 
-// ===================================================================================
+
+// ==================================================================================
 // @Public : NText Collection
+// Placeholder: texture & atlas routines
+// ==================================================================================
 
 enum class TextureFormat
 {
@@ -912,6 +1071,7 @@ enum class TextureFormat
     RGBA      = 1,
     GreyScale = 2,
 };
+
 
 static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
 {
@@ -936,11 +1096,6 @@ static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
     }
 }
 
-static void
-FillAtlas(const char *Data, uint64_t Count, glyph_generator &Generator)
-{
-    FillAtlas((char *)Data, Count, Generator);
-}
 
 static void
 FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
@@ -950,13 +1105,19 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 
     bool HasComplexCharacter = false;
 
-    while(Count)
+    // TODO: Rewrite this loop in a better way, since the only goal is to early
+    // exit if we find a complex character.
+
+    uint32_t ParseCount = Count;
+    char    *ParseData  = Data;
+
+    while(ParseCount)
     {
         __m128i ContainsComplex = _mm_setzero_si128();
 
-        while(Count >= Advance)
+        while(ParseCount >= Advance)
         {
-            __m128i Batch = _mm_loadu_si128((__m128i *) Data);
+            __m128i Batch = _mm_loadu_si128((__m128i *) ParseData);
             __m128i TestX = _mm_and_si128(Batch, ComplexByte);
 
             // NOTE:
@@ -969,8 +1130,8 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
                 break;
             }
 
-            Count -= Advance;
-            Data  += Advance;
+            ParseCount -= Advance;
+            ParseData  += Advance;
         }
 
         HasComplexCharacter = _mm_movemask_epi8(ContainsComplex);
@@ -979,19 +1140,16 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
             break;
         }
 
-        char Token = Data[0];
+        char Token = ParseData[0];
         if(Token < 0)
         {
             HasComplexCharacter = 1;
             break;
         }
 
-        Data++;
-        Count--;
+        ParseData++;
+        ParseCount--;
     }
-
-    // BUG:
-    // Data and count are modified. Need to use other variables in the code above.
 
     if(HasComplexCharacter)
     {
@@ -1001,14 +1159,37 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
     {
         for(uint32_t Idx = 0; Idx < Count; ++Idx)
         {
-            glyph_hash  Hash  = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
-            glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
+            os_glyph_info Info = Generator.OS.FindGlyphInformation((uint32_t)Data[Idx], 16.f);
 
-            if(!State.IsRasterized)
-            {
-            }
+            // glyph_hash  Hash = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
+            // glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
+
+            // if(!State.IsRasterized)
+            // {
+                // TODO:
+                // 1) Shape the glyph     (DONE)
+                // 2) Allocate into atlas
+                // 3) Rasterize
+                // 4) Update the table
+
+                // NOTE:
+                // I think the shaping/rasterizing code should expect code points.
+                // Since at this point we have enough context to know that the code
+                // point is equal to the ASCII value since we are in the non-complex
+                // branch.
+
+                // GetGlyphInfoFromCodePoint((uint32_t)Data[Idx], 96.f, Generator.OS);
+            // }
         }
     }
 }
 
+
+static void
+FillAtlas(const char *Data, uint64_t Count, glyph_generator &Generator)
+{
+    FillAtlas((char *)Data, Count, Generator);
 }
+
+
+} // namespace ntext

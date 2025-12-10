@@ -82,6 +82,17 @@ int main()
     d3d11_renderer Renderer;
     Renderer.Init(HWindow, 1920, 1080);
 
+    ntext::glyph_generator_params Params = {};
+    {
+        Params.FrameMemoryBudget = 10 * 1024 * 1024;
+        Params.FrameMemory       = malloc(Params.FrameMemoryBudget);
+        Params.TextStorage       = ntext::TextStorage::LazyAtlas;
+    }
+
+    ntext::glyph_generator Generator = ntext::CreateGlyphGenerator(Params);
+
+    ntext::FillAtlas("Hello.", sizeof("Hello") - 1, Generator);
+
     while(true)
     {
         MSG Message;
@@ -97,6 +108,22 @@ int main()
         }
 
         Renderer.Clear(0.f, 0.f, 0.f, 1.f);
+
+        // NOTE:
+        // How do you even get the necessary data to draw? You then need a bunch of stuff.
+        // At the very least the source rectangle which is never returned by fill atlas.
+        {
+            // FillAtlas("Hello") -> a series of rectangles and shapes? To render that string we do:
+            // some_struct storage = malloc(sizeof(Hello))
+            // storage.source  = returned[i].source
+            // storage.offset  = returned[i].offset
+            // storage.advance = returned[i1.advance
+
+            // Basically the user has to manage that memory. Or we could copy into a user provided buffer.
+            // But I think we default to returning all of the information and just provide an out of the box solution.
+
+        }
+
         Renderer.Present();
 
         Win32Sleep(5);
