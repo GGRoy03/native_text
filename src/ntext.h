@@ -6,7 +6,7 @@
 #include <immintrin.h>
 #include <stdint.h>
 
-#define NTEXT_ASSERT(Cond) do {if (!(Cond)) __assume(0);} while (0)
+#define NTEXT_ASSERT(Cond) do {if (!(Cond)) __debugbreak();} while (0)
 #define NTEXT_ALIGNPOW2(x,b) (((x) + (b) - 1)&(~((b) - 1)))
 
 #ifdef _WIN32
@@ -403,11 +403,10 @@ backend_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance
                 }
             }
 
-            static int Counter = 0;
-
-            wchar_t OutPath[64];
-            swprintf(OutPath, 64, L"glyph_alpha_%d.bmp", Counter++);
-            WriteGrayscaleBMP(OutPath, TextureWidth, TextureHeight, Buffer);
+            // static int Counter = 0;
+            // wchar_t OutPath[64];
+            // swprintf(OutPath, 64, L"glyph_alpha_%d.bmp", Counter++);
+            // WriteGrayscaleBMP(OutPath, TextureWidth, TextureHeight, Buffer);
         }
 
         RunAnalysis->Release();
@@ -680,10 +679,11 @@ struct glyph_layout_info
 
 struct glyph_entry
 {
-    glyph_hash Hash;
+    glyph_hash        Hash;
 
-    uint64_t PrevLRU;
-    uint64_t NextLRU;
+    uint32_t          PrevLRU;
+    uint32_t          NextLRU;
+    uint32_t          NextFreeEntry;
 
     uint16_t          GlyphIndex;
     rectangle         Source;
@@ -698,31 +698,32 @@ struct glyph_table
     glyph_entry *Buckets;
     glyph_entry  Sentinel;
 
-    uint64_t GroupWidth;
-    uint64_t GroupCount;
-    uint64_t HashMask;
+    uint64_t     GroupWidth;
+    uint64_t     GroupCount;
+    uint64_t     HashMask;
 };
 
 
 struct glyph_state
 {
-    uint64_t   Id;
-    uint16_t   GlyphIndex;
+    uint64_t          Id;
+    uint16_t          GlyphIndex;
     glyph_layout_info LayoutInfo;
-    rectangle  Source;
-    bool       IsRasterized;
+    rectangle         Source;
+    bool              IsRasterized;
 };
 
 
-constexpr uint8_t GlyphTableEmptyMask = 1 << 0;
-constexpr uint8_t GlyphTableDeadMask  = 1 << 1;
-constexpr uint8_t GlyphTableTagMask   = 0xFF & ~0x03;
+constexpr uint32_t GlyphTableInvalidEntry = 0xFFFFFFFFu;
+constexpr uint8_t  GlyphTableEmptyMask    = 1 << 6; 
+constexpr uint8_t  GlyphTableDeadMask     = 1 << 7;
+constexpr uint8_t  GlyphTableTagMask      = 0xFF & ~0x03;
 
 
 static bool
 IsValidGlyphTable(glyph_table *Table)
 {
-    bool Result = (Table) && (Table->Metadata) && (Table->Buckets);
+    bool Result = Table && Table->Metadata && Table->Buckets;
     return Result;
 }
 
@@ -738,18 +739,36 @@ GetGlyphEntry(uint64_t Index, glyph_table *Table)
 }
 
 
-static uint64_t
+static uint32_t
 GetFreeGlyphEntry(glyph_table *Table)
 {
-    uint64_t Result = 0;
+    glyph_entry Sentinel = Table->Sentinel;
+
+    if(Sentinel.NextFreeEntry == GlyphTableInvalidEntry)
+    {
+        NTEXT_ASSERT(!"Not Implemented");
+    }
+
+    uint32_t Result = Sentinel.NextFreeEntry;
+    NTEXT_ASSERT(Result != GlyphTableInvalidEntry);
+
+    glyph_entry *Entry = GetGlyphEntry(Result, Table);
+    Sentinel.NextFreeEntry = Entry->NextFreeEntry;
+    Entry->NextFreeEntry   = GlyphTableInvalidEntry;
+
+    NTEXT_ASSERT(Entry);
+    NTEXT_ASSERT(Entry->NextFreeEntry == GlyphTableInvalidEntry);
+    NTEXT_ASSERT(Entry == GetGlyphEntry(Result, Table));
+
     return Result;
 }
 
 
-static uint64_t
+static uint32_t
 GetGlyphGroupIndexFromHash(glyph_hash Hash, glyph_table *Table)
 {
-    uint64_t Result = 0;
+    uint64_t Low64  = _mm_cvtsi128_si64(Hash.Value);
+    uint32_t Result = (uint32_t)(Low64 & Table->HashMask);
 
     return Result;
 }
@@ -792,6 +811,8 @@ ComputeGlyphHash(size_t Count, char unsigned *At, char unsigned *Seedx16)
 
     size_t Overhang = Count % 16;
 
+    // Think there is a fix for that on the refterm issues tab.
+
 #if 0
     __m128i In = _mm_loadu_si128((__m128i *)At);
 #else
@@ -816,7 +837,9 @@ ComputeGlyphHash(size_t Count, char unsigned *At, char unsigned *Seedx16)
 static glyph_tag
 GetGlyphTagFromHash(glyph_hash Hash)
 {
-    glyph_tag Result = {};
+    uint64_t  Low64  = _mm_cvtsi128_si64(Hash.Value);
+    glyph_tag Result = {.Value = (uint8_t)(Low64 & 0x3F)};
+
     return Result;
 }
 
@@ -824,8 +847,10 @@ GetGlyphTagFromHash(glyph_hash Hash)
 static bool
 GlyphHashesAreEqual(glyph_hash A, glyph_hash B)
 {
-    bool Result = 1;
-    return Result;
+    __m128i Compare = _mm_cmpeq_epi8(A.Value, B.Value);
+    int     Mask    = _mm_movemask_epi8(Compare);
+
+    return (Mask == 0xFFFF);
 }
 
 
@@ -859,10 +884,34 @@ PlaceGlyphTableInMemory(glyph_table_params Params, void *Memory)
         Result->Buckets    = Buckets;
         Result->GroupWidth = static_cast<uint64_t>(Params.GroupWidth);
         Result->GroupCount = Params.GroupCount;
-        Result->HashMask   = SlotCount - 1;
+        Result->HashMask   = Params.GroupCount - 1; // This is only used to find the group index, not the slot index.
 
-        // TODO:
-        // Init sentinel
+        for(uint32_t Idx = 0; Idx < SlotCount; ++Idx)
+        {
+            glyph_entry *Entry = GetGlyphEntry(Idx, Result);
+
+            if(Idx + 1 < SlotCount)
+            {
+                Entry->NextFreeEntry = Idx + 1;
+            }
+            else
+            {
+                Entry->NextFreeEntry = GlyphTableInvalidEntry;
+            }
+
+            Entry->GlyphIndex   = 0;
+            Entry->Source       = {};
+            Entry->LayoutInfo   = {};
+            Entry->IsRasterized = false;
+        }
+
+        for(uint32_t Idx = 0; Idx < SlotCount; ++Idx)
+        {
+            Result->Metadata[Idx] = GlyphTableEmptyMask;
+        }
+
+        Result->Sentinel.PrevLRU = GlyphTableInvalidEntry;
+        Result->Sentinel.NextLRU = GlyphTableInvalidEntry;
     }
 
     return Result;
@@ -875,10 +924,12 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
     NTEXT_ASSERT(Table);
 
     glyph_entry *Result     = 0;
-    uint64_t     EntryIndex = 0;
+    uint32_t     EntryIndex = 0;
 
-    uint64_t ProbeCount = 0;
-    uint64_t GroupIndex = GetGlyphGroupIndexFromHash(Hash, Table);
+    uint32_t ProbeCount = 0;
+    uint32_t GroupIndex = GetGlyphGroupIndexFromHash(Hash, Table);
+
+    NTEXT_ASSERT(GroupIndex < Table->GroupCount);
 
     while(true)
     {
@@ -936,14 +987,16 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
     else
     {
         // No existing entry was found, allocate a new one and link it into the chain.
+        // We also need to update the metadata array by clearing all state bits (empty and dead)
+        // and writing the tag.
 
-        // WARN:
-        // We are missing the allocation part. We have to mark it.
-        // We have the entry index so.. We just have to compute the tag and clear
-        // relevant bits inside the metadata?
+        EntryIndex = GetFreeGlyphEntry(Table);
+        NTEXT_ASSERT(EntryIndex != GlyphTableInvalidEntry);
 
-        uint64_t EntryIndex = GetFreeGlyphEntry(Table);
-        NTEXT_ASSERT(EntryIndex);
+        // Could the compiler optimize this into a single write? I believe the 0 write is necessary for the logic here.
+        uint8_t *Meta = Table->Metadata + EntryIndex;
+        *Meta = 0;                                  // Clear all bits.
+        *Meta = (GetGlyphTagFromHash(Hash).Value);  // Set the tag meta-data to the low 6 bits
 
         Result = GetGlyphEntry(EntryIndex, Table);
         Result->Hash = Hash;
@@ -951,14 +1004,19 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
 
     glyph_entry *Sentinel = &Table->Sentinel;
     Result->NextLRU = Sentinel->NextLRU;
-    Result->PrevLRU = 0;
+    Result->PrevLRU = GlyphTableInvalidEntry;
 
-    glyph_entry *LastNext = GetGlyphEntry(Sentinel->NextLRU, Table);
-    LastNext->PrevLRU = EntryIndex;
+    // The only case where this matters is when writing the first entry. Maybe a slightly better design would remove this branch.
+    if(Sentinel->NextLRU != GlyphTableInvalidEntry)
+    {
+        glyph_entry *LastNext = GetGlyphEntry(Sentinel->NextLRU, Table);
+        LastNext->PrevLRU = EntryIndex;
+    }
+
     Sentinel->NextLRU = EntryIndex;
 
     glyph_state State = {};
-    State.IsRasterized = 0;
+    State.IsRasterized = Result->IsRasterized;
     State.Id           = EntryIndex;
 
     return State;
@@ -1171,7 +1229,7 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
     {
         for(uint32_t Idx = 0; Idx < Count; ++Idx)
         {
-            glyph_hash  Hash = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
+            glyph_hash  Hash  = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
             glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
 
             if(!State.IsRasterized)
