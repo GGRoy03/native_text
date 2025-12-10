@@ -236,21 +236,31 @@ struct os_glyph_info
     float SizeY;
 };
 
-
-struct os_context
+struct rasterized_buffer
 {
-public:
-    os_glyph_info FindGlyphInformation          (uint32_t CodePointer, float FontSize);
-    void          RasterizeGlyphToAlphaTexture  (uint16_t GlyphIndex, float Advance, float EmSize, memory_arena *Arena);
+    void    *Buffer;
+    uint32_t Stride;
+    uint32_t BufferWidth;
+    uint32_t BufferHeight;
+    uint32_t BytesPerPixel;
+};
+
+
+struct backend_context
+{
+    bool              IsValid                       ();
+
+    os_glyph_info     FindGlyphInformation          (uint32_t CodePointer, float FontSize);
+    rasterized_buffer RasterizeGlyphToAlphaTexture  (uint16_t GlyphIndex, float Advance, float EmSize, memory_arena *Arena);
 
     IDWriteFactory  *DirectWrite;
     IDWriteFontFace *Font;
 };
 
 
-static os_context CreateOSContext(void)
+static backend_context CreateBackendContext(void)
 {
-    os_context Context = {};
+    backend_context Context = {};
 
     IDWriteFactory *DirectWrite;
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown **>(&DirectWrite));
@@ -289,14 +299,15 @@ static os_context CreateOSContext(void)
 }
 
 
-static bool IsValidOSContext(os_context Context)
+bool backend_context::IsValid()
 {
-    bool Result = (Context.DirectWrite) && (Context.Font);
+    bool Result = (this->DirectWrite) && (this->Font);
     return Result;
 }
 
 
-os_glyph_info os_context::FindGlyphInformation(uint32_t CodePoint, float EmSize)
+os_glyph_info
+backend_context::FindGlyphInformation(uint32_t CodePoint, float EmSize)
 {
     HRESULT Hr = S_OK;
 
@@ -334,8 +345,13 @@ os_glyph_info os_context::FindGlyphInformation(uint32_t CodePoint, float EmSize)
     return Result;
 }
 
-void os_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance, float EmSize, memory_arena *Arena)
+rasterized_buffer
+backend_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance, float EmSize, memory_arena *Arena)
 {
+    rasterized_buffer Result = {};
+
+    // Need to check for NULL here? Maybe assert since it probably needs to be done before this point.
+
     IDWriteFontFace *FontFace = this->Font;
     IDWriteFactory  *DWrite   = this->DirectWrite;
 
@@ -377,10 +393,13 @@ void os_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance
             BYTE *Buffer = PushArray(Arena, BYTE, BufferSize);
             if(Buffer)
             {
-                HRESULT HR = RunAnalysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds, Buffer, BufferSize);
-                if (FAILED(HR))
+                if(RunAnalysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds, Buffer, BufferSize) == S_OK)
                 {
-                    NTEXT_ASSERT(!"Why?");
+                    Result.Buffer        = Buffer;
+                    Result.Stride        = Stride;
+                    Result.BufferWidth   = TextureWidth;
+                    Result.BufferHeight  = TextureHeight;
+                    Result.BytesPerPixel = BytesPerPixel;
                 }
             }
 
@@ -393,6 +412,8 @@ void os_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance
 
         RunAnalysis->Release();
     }
+
+    return Result;
 }
 
 
@@ -975,7 +996,7 @@ struct glyph_generator
 
     // Misc
     TextStorage       TextStorage;
-    os_context        OS;
+    backend_context   Backend;
 };
 
 
@@ -1035,9 +1056,9 @@ static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
         Generator.TextStorage = Params.TextStorage;
     }
 
-    // OS Initialization
+    // Backend Initialization
     {
-        Generator.OS = CreateOSContext();
+        Generator.Backend = CreateBackendContext();
     }
 
     return Generator;
@@ -1150,47 +1171,29 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
     {
         for(uint32_t Idx = 0; Idx < Count; ++Idx)
         {
-            // NOTE:
-            // These two things should only be done in the case where
-            // we haven't already rasterized the glyph. This would need
-            // the full hashmap implementation.
+            glyph_hash  Hash = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
+            glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
 
-            os_glyph_info Info = Generator.OS.FindGlyphInformation((uint32_t)Data[Idx], 16.f);
-
-            // BUG:
-            // The packer can only handle uint16_t right now. 
-            // Should we just round up to an integer?
-
-            packed_rectangle Rectangle =
+            if(!State.IsRasterized)
             {
-                .Width  = static_cast<uint16_t>(Info.SizeX),
-                .Height = static_cast<uint16_t>(Info.SizeY),
-            };
+                os_glyph_info Info = Generator.Backend.FindGlyphInformation((uint32_t)Data[Idx], 16.f);
 
-            PackRectangle(Rectangle, Generator.Packer);
+                packed_rectangle Rectangle =
+                {
+                    .Width  = static_cast<uint16_t>(Info.SizeX),
+                    .Height = static_cast<uint16_t>(Info.SizeY),
+                };
 
-            if(Rectangle.WasPacked)
-            {
-                Generator.OS.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);
+                PackRectangle(Rectangle, Generator.Packer);
+
+                if(Rectangle.WasPacked)
+                {
+                    rasterized_buffer Buffer = Generator.Backend.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);
+                    // TODO: Figure out what to do with the buffer. (And what to store as well)
+
+                    // TODO: Update the table.
+                }
             }
-
-            // glyph_hash  Hash = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
-            // glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
-
-            // if(!State.IsRasterized)
-            // {
-                // TODO:
-                // 3) Rasterize
-                // 4) Update the table
-
-                // NOTE:
-                // I think the shaping/rasterizing code should expect code points.
-                // Since at this point we have enough context to know that the code
-                // point is equal to the ASCII value since we are in the non-complex
-                // branch.
-
-                // GetGlyphInfoFromCodePoint((uint32_t)Data[Idx], 96.f, Generator.OS);
-            // }
         }
     }
 }
