@@ -240,7 +240,8 @@ struct os_glyph_info
 struct os_context
 {
 public:
-    os_glyph_info FindGlyphInformation(uint32_t CodePointer, float FontSize);
+    os_glyph_info FindGlyphInformation          (uint32_t CodePointer, float FontSize);
+    void          RasterizeGlyphToAlphaTexture  (uint16_t GlyphIndex, float Advance, float EmSize, memory_arena *Arena);
 
     IDWriteFactory  *DirectWrite;
     IDWriteFontFace *Font;
@@ -333,98 +334,67 @@ os_glyph_info os_context::FindGlyphInformation(uint32_t CodePoint, float EmSize)
     return Result;
 }
 
-
-static void
-TryRasterizeAndDump(os_context Context, memory_arena *Arena)
+void os_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance, float EmSize, memory_arena *Arena)
 {
-    IDWriteFontFace *FontFace = Context.Font;
-    IDWriteFactory  *DWrite   = Context.DirectWrite;
+    IDWriteFontFace *FontFace = this->Font;
+    IDWriteFactory  *DWrite   = this->DirectWrite;
 
-    const wchar_t *Text       = L"Hello, DWrite";
-    const UINT32   TextLength = (UINT32)wcslen(Text);
+    UINT16              GlyphIndices[1] = {GlyphIndex};
+    FLOAT               Advances[1]     = {Advance};
+    DWRITE_GLYPH_OFFSET Offsets[1]      = {0.f, 0.f};
 
-    UINT32 *Codepoints = (UINT32 *)PushArray(Arena, UINT32, TextLength);
-    for(UINT32 Idx = 0; Idx < TextLength; ++Idx)
+    DWRITE_GLYPH_RUN GlyphRun =
     {
-        Codepoints[Idx] = (UINT32)Text[Idx];
-    }
+        .fontFace      = FontFace,
+        .fontEmSize    = EmSize,
+        .glyphCount    = 1,
+        .glyphIndices  = GlyphIndices,
+        .glyphAdvances = Advances,
+        .glyphOffsets  = Offsets,
+        .isSideways    = FALSE,
+        .bidiLevel     = 0,
+    };
 
-    UINT16 *GlyphIndices = (UINT16 *)PushArray(Arena, UINT16, TextLength);
-    FontFace->GetGlyphIndices(Codepoints, TextLength, GlyphIndices);
+    IDWriteGlyphRunAnalysis *RunAnalysis = 0;
+    DWrite->CreateGlyphRunAnalysis(&GlyphRun, 1.f, 0,
+                                   DWRITE_RENDERING_MODE_ALIASED, DWRITE_MEASURING_MODE_NATURAL,
+                                   0.f, 0.f, &RunAnalysis);
 
-    UINT32 GlyphCount = TextLength;
-
-    DWRITE_FONT_METRICS FontMetrics = {};
-    FontFace->GetMetrics(&FontMetrics);
-    UINT32 DesignUnitsPerEm = FontMetrics.designUnitsPerEm;
-
-    DWRITE_GLYPH_METRICS *GlyphMetrics = (DWRITE_GLYPH_METRICS *)PushArray(Arena, DWRITE_GLYPH_METRICS, GlyphCount);
-
-    FontFace->GetDesignGlyphMetrics(GlyphIndices, GlyphCount, GlyphMetrics, FALSE);
-
-    FLOAT  FontEmSize = 64.0f;
-    FLOAT *Advances   = (FLOAT *)PushArray(Arena, FLOAT, GlyphCount);
-    FLOAT  Scale      = FontEmSize / (FLOAT)DesignUnitsPerEm;
-
-    for(UINT32 Idx = 0; Idx < GlyphCount; ++Idx)
+    if(RunAnalysis)
     {
-        Advances[Idx] = (FLOAT)GlyphMetrics[Idx].advanceWidth * Scale;
+        RECT TextureBounds = {};
+        RunAnalysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds);
+
+        int TextureWidth  = TextureBounds.right  - TextureBounds.left;
+        int TextureHeight = TextureBounds.bottom - TextureBounds.top;
+
+        if(TextureWidth > 0 && TextureHeight > 0)
+        {
+            int      BytesPerPixel = 1;
+            int      Stride        = TextureWidth * BytesPerPixel;
+            uint32_t BufferSize    = TextureWidth * TextureHeight * BytesPerPixel;
+
+            BYTE *Buffer = PushArray(Arena, BYTE, BufferSize);
+            if(Buffer)
+            {
+                HRESULT HR = RunAnalysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds, Buffer, BufferSize);
+                if (FAILED(HR))
+                {
+                    NTEXT_ASSERT(!"Why?");
+                }
+            }
+
+            static int Counter = 0;
+
+            wchar_t OutPath[64];
+            swprintf(OutPath, 64, L"glyph_alpha_%d.bmp", Counter++);
+            WriteGrayscaleBMP(OutPath, TextureWidth, TextureHeight, Buffer);
+        }
+
+        RunAnalysis->Release();
     }
-
-    DWRITE_GLYPH_OFFSET *Offsets = (DWRITE_GLYPH_OFFSET *)PushArray(Arena, DWRITE_GLYPH_OFFSET, GlyphCount);
-    for(UINT32 Idx = 0; Idx < GlyphCount; ++Idx)
-    {
-        Offsets[Idx].advanceOffset  = 0.0f;
-        Offsets[Idx].ascenderOffset = 0.0f;
-    }
-
-    // NOTE:
-    // This is specified as containing all of the information needed to draw.
-    // Hence, if I just store this information, then the user should be able
-    // to do anything? Now the problem is: Do we just rasterize glyph by glyph?
-    // Do we allow more? For simplicity we could force glyph by glyph for now.
-
-    DWRITE_GLYPH_RUN GlyphRun = {};
-    GlyphRun.fontFace      = FontFace;
-    GlyphRun.fontEmSize    = FontEmSize;
-    GlyphRun.glyphCount    = GlyphCount;
-    GlyphRun.glyphIndices  = GlyphIndices;
-    GlyphRun.glyphAdvances = Advances;
-    GlyphRun.glyphOffsets  = Offsets;
-    GlyphRun.bidiLevel     = 0;
-    GlyphRun.isSideways    = FALSE;
-
-    IDWriteGlyphRunAnalysis *RunAnalysis;
-    DWrite->CreateGlyphRunAnalysis(
-        &GlyphRun,
-        1.0f,
-        0,
-        DWRITE_RENDERING_MODE_ALIASED,
-        DWRITE_MEASURING_MODE_NATURAL,
-        0.0f,
-        0.0f,
-        &RunAnalysis);
-
-    RECT TexBounds = {};
-    RunAnalysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &TexBounds);
-
-    INT TexW = TexBounds.right - TexBounds.left;
-    INT TexH = TexBounds.bottom - TexBounds.top;
-
-    UINT  BytesPerPixel   = 1;
-    UINT  BufferSize      = TexW * TexH * BytesPerPixel;
-    BYTE *AlphaBuffer     = (BYTE *)PushArray(Arena, BYTE, BufferSize);
-    RECT  RequestedBounds = TexBounds;
-
-    RunAnalysis->CreateAlphaTexture(
-        DWRITE_TEXTURE_ALIASED_1x1,
-        &RequestedBounds,
-        AlphaBuffer,
-        BufferSize);
-
-    const wchar_t *OutPath = L"glyph_alpha.bmp";
-    WriteGrayscaleBMP(OutPath, TexW, TexH, AlphaBuffer);
 }
+
 
 #endif // NTEXT_WIN32
 
@@ -481,7 +451,7 @@ GetRectanglePackerFootprint(uint16_t Width)
 
 
 static rectangle_packer *
-CreateRectanglePacker(uint16_t Width, uint16_t Height, void *Memory)
+PlaceRectanglePackerInMemory(uint16_t Width, uint16_t Height, void *Memory)
 {
     rectangle_packer *Result = 0;
 
@@ -503,8 +473,10 @@ CreateRectanglePacker(uint16_t Width, uint16_t Height, void *Memory)
 
 
 static void
-PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
+PackRectangle(packed_rectangle &Rectangle, rectangle_packer *Packer)
 {
+    NTEXT_ASSERT(Packer);
+
     uint16_t Width  = Rectangle.Width;
     uint16_t Height = Rectangle.Height;
 
@@ -517,14 +489,14 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
     uint16_t BestIndexExclusive = UINT16_MAX;
     point    BestPoint          = {UINT16_MAX, UINT16_MAX};
 
-    NTEXT_ASSERT(Packer.SkylineCount);
+    NTEXT_ASSERT(Packer->SkylineCount);
 
-    for(uint16_t Idx = 0; Idx < Packer.SkylineCount; ++Idx)
+    for(uint16_t Idx = 0; Idx < Packer->SkylineCount; ++Idx)
     {
-        point Point = Packer.Skyline[Idx];
+        point Point = Packer->Skyline[Idx];
 
         // If on the current skyline we do not have horizontal space, then we can break since the array is sorted left to right.
-        if(Width > Packer.Width - Point.X)
+        if(Width > Packer->Width - Point.X)
         {
             break;
         }
@@ -537,11 +509,11 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
 
         uint16_t XMax           = Point.X + Width;
         uint16_t IndexExclusive = 0;
-        for(IndexExclusive = Idx + 1; IndexExclusive < Packer.SkylineCount; ++IndexExclusive)
+        for(IndexExclusive = Idx + 1; IndexExclusive < Packer->SkylineCount; ++IndexExclusive)
         {
             // XMax is the right edge of the current rectangle. If it is smaller or equal then we know that
             // there is no way to intersect on the X axis anymore, because the skylines are sorted from left to right.
-            if(XMax <= Packer.Skyline[IndexExclusive].X)
+            if(XMax <= Packer->Skyline[IndexExclusive].X)
             {
                 break;
             }
@@ -549,9 +521,9 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
             // At this point, we know we are intersecting on the X axis, thus we need to raise the skyline,
             // which is what creates dead space. As long as we intersect on the X axis, we have to continue raising the
             // point.
-            if(Point.Y < Packer.Skyline[IndexExclusive].Y)
+            if(Point.Y < Packer->Skyline[IndexExclusive].Y)
             {
-                Point.Y = Packer.Skyline[IndexExclusive].Y;
+                Point.Y = Packer->Skyline[IndexExclusive].Y;
             }
         }
 
@@ -562,7 +534,7 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
         }
 
         // Not enough vertical space to store this rectangle.
-        if(Height > Packer.Height - Point.Y)
+        if(Height > Packer->Height - Point.Y)
         {
             continue;
         }
@@ -589,18 +561,18 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
     // coordinate. This ensures that the skyline goes from left to right.
 
     point NewTopLeft  = {BestPoint.X                               , static_cast<uint16_t>(BestPoint.Y + Height)};
-    point NewBotRight = {static_cast<uint16_t>(BestPoint.X + Width), Packer.Skyline[BestIndexExclusive - 1].Y};
+    point NewBotRight = {static_cast<uint16_t>(BestPoint.X + Width), Packer->Skyline[BestIndexExclusive - 1].Y};
 
     // To know if we are creating a new skyline from the bottom right point, we need to check multiple cases.
     // If the first exclusive point is a valid index, then we simply check: if (smaller) new point else no.
     // If the first exclusive point is not a valid index, then we simply check: if(not_on_boundary) new point
 
-    bool HasBottomRightPoint = BestIndexExclusive < Packer.SkylineCount ?
-        NewBotRight.X < Packer.Skyline[BestIndexExclusive].X :
-        NewBotRight.X < Packer.Width;
+    bool HasBottomRightPoint = BestIndexExclusive < Packer->SkylineCount ?
+        NewBotRight.X < Packer->Skyline[BestIndexExclusive].X :
+        NewBotRight.X < Packer->Width;
 
     uint16_t InsertedCount = 1 + HasBottomRightPoint;
-    NTEXT_ASSERT(Packer.SkylineCount + InsertedCount - RemovedCount <= Packer.Width);
+    NTEXT_ASSERT(Packer->SkylineCount + InsertedCount - RemovedCount <= Packer->Width);
 
     if(InsertedCount > RemovedCount)
     {
@@ -608,15 +580,15 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
         // Make space for the new elements by shifting end by (InsertedCount - RemovedCount)
         // This grows the array.
 
-        uint16_t Start = Packer.SkylineCount - 1;
+        uint16_t Start = Packer->SkylineCount - 1;
         uint16_t End   = Start + (InsertedCount - RemovedCount);
 
         for(; Start >= BestIndexExclusive; --Start, --End)
         {
-            Packer.Skyline[End] = Packer.Skyline[Start];
+            Packer->Skyline[End] = Packer->Skyline[Start];
         }
 
-        Packer.SkylineCount += (InsertedCount - RemovedCount);
+        Packer->SkylineCount += (InsertedCount - RemovedCount);
     } else
     if(InsertedCount < RemovedCount)
     {
@@ -626,18 +598,18 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer &Packer)
         uint16_t Start = BestIndexExclusive;
         uint16_t End   = Start - (RemovedCount - InsertedCount);
 
-        for(; Start < Packer.SkylineCount; ++Start, ++End)
+        for(; Start < Packer->SkylineCount; ++Start, ++End)
         {
-            Packer.Skyline[End] = Packer.Skyline[Start];
+            Packer->Skyline[End] = Packer->Skyline[Start];
         }
 
-        Packer.SkylineCount += (RemovedCount - InsertedCount);
+        Packer->SkylineCount += (RemovedCount - InsertedCount);
     }
 
-    Packer.Skyline[BestIndexInclusive] = NewTopLeft;
+    Packer->Skyline[BestIndexInclusive] = NewTopLeft;
     if(HasBottomRightPoint)
     {
-        Packer.Skyline[BestIndexInclusive + 1] = NewBotRight;
+        Packer->Skyline[BestIndexInclusive + 1] = NewBotRight;
     }
 
     Rectangle.WasPacked = 1;
@@ -994,10 +966,16 @@ struct glyph_generator_params
 
 struct glyph_generator
 {
-    TextStorage   TextStorage;
-    memory_arena *Arena;
-    os_context    OS;
-    glyph_table  *GlyphTable;
+    // Memory
+    memory_arena     *Arena;
+
+    // Systems
+    glyph_table      *GlyphTable;
+    rectangle_packer *Packer;
+
+    // Misc
+    TextStorage       TextStorage;
+    os_context        OS;
 };
 
 
@@ -1035,6 +1013,19 @@ static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
         Generator.GlyphTable = PlaceGlyphTableInMemory(Params, Memory);
 
         NTEXT_ASSERT(Generator.GlyphTable);
+    }
+
+    // Packer
+    {
+        uint16_t Width  = 1024;
+        uint16_t Height = 1024;
+
+        uint64_t Footprint = GetRectanglePackerFootprint(Width);
+        void    *Memory    = PushArena(Generator.Arena, Footprint, AlignOf(void *));
+
+        Generator.Packer = PlaceRectanglePackerInMemory(Width, Height, Memory);
+
+        NTEXT_ASSERT(Generator.Packer);
     }
 
     // Constant Forwarding
@@ -1159,7 +1150,29 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
     {
         for(uint32_t Idx = 0; Idx < Count; ++Idx)
         {
+            // NOTE:
+            // These two things should only be done in the case where
+            // we haven't already rasterized the glyph. This would need
+            // the full hashmap implementation.
+
             os_glyph_info Info = Generator.OS.FindGlyphInformation((uint32_t)Data[Idx], 16.f);
+
+            // BUG:
+            // The packer can only handle uint16_t right now. 
+            // Should we just round up to an integer?
+
+            packed_rectangle Rectangle =
+            {
+                .Width  = static_cast<uint16_t>(Info.SizeX),
+                .Height = static_cast<uint16_t>(Info.SizeY),
+            };
+
+            PackRectangle(Rectangle, Generator.Packer);
+
+            if(Rectangle.WasPacked)
+            {
+                Generator.OS.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);
+            }
 
             // glyph_hash  Hash = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
             // glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
@@ -1167,8 +1180,6 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
             // if(!State.IsRasterized)
             // {
                 // TODO:
-                // 1) Shape the glyph     (DONE)
-                // 2) Allocate into atlas
                 // 3) Rasterize
                 // 4) Update the table
 
