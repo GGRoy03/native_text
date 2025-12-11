@@ -54,12 +54,8 @@ private:
         float TransformRow0[4];
         float TransformRow1[4];
         float TransformRow2[4];
-
         float ViewportSize[2];
-        float _Pad0[2];
-
         float AtlasSize[2];
-        float _Pad1[2];
     };
 
     struct glyph_vertex
@@ -174,10 +170,10 @@ void d3d11_renderer::Init(void *WindowHandle, int Width, int Height)
 
     D3D11_RASTERIZER_DESC RasterizerDesc = {};
     RasterizerDesc.FillMode              = D3D11_FILL_SOLID;
-    RasterizerDesc.CullMode              = D3D11_CULL_BACK;
+    RasterizerDesc.CullMode              = D3D11_CULL_NONE;
     RasterizerDesc.FrontCounterClockwise = FALSE;
-    RasterizerDesc.DepthClipEnable       = TRUE;
-    RasterizerDesc.ScissorEnable         = TRUE; 
+    RasterizerDesc.DepthClipEnable       = FALSE;
+    RasterizerDesc.ScissorEnable         = FALSE; 
     RasterizerDesc.MultisampleEnable     = FALSE;
     RasterizerDesc.AntialiasedLineEnable = FALSE;
 
@@ -213,9 +209,9 @@ void d3d11_renderer::Init(void *WindowHandle, int Width, int Height)
     {
         D3D11_INPUT_ELEMENT_DESC LayoutDesc[] =
         {
-            { "POS",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 }, // Bounds
-            { "FONT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 }, // Source
-            { "COL",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 }, // Color (R,G,B,A)
+            { "POS",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,  0, D3D11_INPUT_PER_INSTANCE_DATA, 1 }, // Bounds
+            { "FONT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 }, // Source
+            { "COL",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1 }, // Color (R,G,B,A)
         };
 
         HRESULT hr = this->Device->CreateInputLayout(LayoutDesc, ARRAYSIZE(LayoutDesc), D3D11VtxShaderBytes, sizeof(D3D11VtxShaderBytes), &this->InputLayout);
@@ -241,12 +237,10 @@ void d3d11_renderer::Init(void *WindowHandle, int Width, int Height)
         size_t VertexBufferSize = 64 * 1024;
 
         D3D11_BUFFER_DESC BufferDesc = {};
-        BufferDesc.Usage = D3D11_USAGE_DEFAULT;
-        BufferDesc.ByteWidth = (UINT)VertexBufferSize;
-        BufferDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        BufferDesc.CPUAccessFlags = 0;
-        BufferDesc.MiscFlags = 0;
-        BufferDesc.StructureByteStride = 0;
+        BufferDesc.Usage          = D3D11_USAGE_DYNAMIC;
+        BufferDesc.ByteWidth      = (UINT)VertexBufferSize;
+        BufferDesc.BindFlags      = D3D11_BIND_VERTEX_BUFFER;
+        BufferDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
         HRESULT hr = this->Device->CreateBuffer(&BufferDesc, nullptr, &this->VertexBuffer);
         ASSERT(SUCCEEDED(hr) && this->VertexBuffer);
@@ -288,10 +282,9 @@ void d3d11_renderer::UpdateTextCache(const ntext::rasterized_glyph_list &List)
         ntext::rasterized_glyph  &Glyph  = Node->Value;
         ntext::rasterized_buffer &Buffer = Glyph.Buffer;
 
-        // assume alpha-only source
+        // Assume alpha-only source for now.
         ASSERT(Buffer.BytesPerPixel == 1);
 
-        // rectangle -> destination region inside atlas
         uint32_t DstLeft   = (uint32_t)Glyph.Source.Left;
         uint32_t DstTop    = (uint32_t)Glyph.Source.Top;
         uint32_t DstRight  = (uint32_t)Glyph.Source.Right;
@@ -308,12 +301,12 @@ void d3d11_renderer::UpdateTextCache(const ntext::rasterized_glyph_list &List)
         uint8_t *SrcBase   = (uint8_t *)Buffer.Data;
         uint32_t SrcStride = Buffer.Stride ? Buffer.Stride : CopyWidth;
 
-        for (uint32_t y = 0; y < CopyHeight; ++y)
+        for (uint32_t y = 0; y < Buffer.Height; ++y)
         {
             uint8_t *SrcRow = SrcBase   + (size_t)y * SrcStride;
             uint8_t *DstRow = AtlasBase + (size_t)(DstTop + y) * AtlasRowPitch + (size_t)DstLeft * AtlasBPP;
 
-            for (uint32_t x = 0; x < CopyWidth; ++x)
+            for (uint32_t x = 0; x < Buffer.Width; ++x)
             {
                 uint8_t  Alpha    = SrcRow[x];
                 uint8_t *DstPixel = DstRow + (size_t)x * AtlasBPP;
@@ -331,7 +324,46 @@ void d3d11_renderer::UpdateTextCache(const ntext::rasterized_glyph_list &List)
 
 void d3d11_renderer::DrawTextToScreen(void)
 {
-    // Update constants
+    // Update Buffer
+
+    // There is a problem because we expect floats in the shader.
+    
+    ntext::rectangle Bounds =
+    {
+        .Left   = 100.f,
+        .Top    = 100.f,
+        .Right  = 114.f,
+        .Bottom = 118.f,
+    };
+
+    ntext::rectangle Source =
+    {
+        .Left   = 0.f,
+        .Top    = 0.f,
+        .Right  = 14.f,
+        .Bottom = 18.f,
+    };
+
+    glyph_vertex Glyph =
+    {
+        .Bounds = Bounds,
+        .Source = Source,
+        .R      = 1.f,
+        .G      = 0.f,
+        .B      = 0.f,
+        .A      = 1.f,
+    };
+
+    D3D11_MAPPED_SUBRESOURCE Mapped = {};
+    HRESULT HR = DeviceContext->Map(this->VertexBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &Mapped);
+    if (SUCCEEDED(HR) && Mapped.pData)
+    {
+        memcpy(Mapped.pData, &Glyph, sizeof(Glyph));
+        DeviceContext->Unmap(this->VertexBuffer, 0);
+    }
+
+
+    // Update Constants
     constant_buffer ConstantBuffer = {};
     ConstantBuffer.TransformRow0[0] = 1.0f; ConstantBuffer.TransformRow0[1] = 0.0f; ConstantBuffer.TransformRow0[2] = 0.0f; ConstantBuffer.TransformRow0[3] = 0.0f;
     ConstantBuffer.TransformRow1[0] = 0.0f; ConstantBuffer.TransformRow1[1] = 1.0f; ConstantBuffer.TransformRow1[2] = 0.0f; ConstantBuffer.TransformRow1[3] = 0.0f;
@@ -344,7 +376,7 @@ void d3d11_renderer::DrawTextToScreen(void)
     ConstantBuffer.AtlasSize[1] = this->AtlasHeight;
 
     D3D11_MAPPED_SUBRESOURCE MappedBuffer = {};
-    HRESULT HR = this->DeviceContext->Map(this->ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedBuffer);
+    HR = this->DeviceContext->Map(this->ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedBuffer);
     ASSERT(SUCCEEDED(HR) && MappedBuffer.pData);
     memcpy(MappedBuffer.pData, &ConstantBuffer, sizeof(ConstantBuffer));
     this->DeviceContext->Unmap(this->ConstantBuffer, 0);
@@ -354,7 +386,7 @@ void d3d11_renderer::DrawTextToScreen(void)
     UINT Offset = 0;
     this->DeviceContext->IASetVertexBuffers(0, 1, &this->VertexBuffer, &Stride, &Offset);
     this->DeviceContext->IASetInputLayout(this->InputLayout);
-    this->DeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    this->DeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 
     // Output Merger State
     float BlendFactor[4] = {0,0,0,0};
@@ -376,7 +408,7 @@ void d3d11_renderer::DrawTextToScreen(void)
     this->DeviceContext->RSSetViewports(1, &this->Viewport);
 
     // Draw
-    this->DeviceContext->Draw(1, 0);
+    this->DeviceContext->DrawInstanced(4, 1, 0, 0);
 }
 
 void d3d11_renderer::Present()

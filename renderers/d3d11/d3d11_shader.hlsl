@@ -36,18 +36,18 @@ VertexToPixel VertexMain(CPUToVertex Input)
 
     float2 CornerPositionInPixel[] =
     {
-        float2(RectTopLeftInPixel.x , RectBotRightInPixel.y),
-        float2(RectTopLeftInPixel.x , RectTopLeftInPixel.y ),
-        float2(RectBotRightInPixel.x, RectBotRightInPixel.y),
-        float2(RectBotRightInPixel.x, RectTopLeftInPixel.y ),
+        float2(RectTopLeftInPixel.x , RectBotRightInPixel.y), // Bottom Left
+        float2(RectTopLeftInPixel.x , RectTopLeftInPixel.y ), // Top    Left
+        float2(RectBotRightInPixel.x, RectBotRightInPixel.y), // Bottom Right
+        float2(RectBotRightInPixel.x, RectTopLeftInPixel.y ), // Top    Right
     };
 
     float2 AtlasSourceInPixel[] =
     {
-        float2(AtlasTopLeftInPixel.x , AtlasBotRightInPixel.y),
-        float2(AtlasTopLeftInPixel.x , AtlasTopLeftInPixel.y ),
-        float2(AtlasBotRightInPixel.x, AtlasBotRightInPixel.y),
-        float2(AtlasBotRightInPixel.x, AtlasTopLeftInPixel.y ),
+        float2(AtlasTopLeftInPixel.x , AtlasBotRightInPixel.y), // Bottom Left
+        float2(AtlasTopLeftInPixel.x , AtlasTopLeftInPixel.y ), // Top    Left
+        float2(AtlasBotRightInPixel.x, AtlasBotRightInPixel.y), // Bottom Right
+        float2(AtlasBotRightInPixel.x, AtlasTopLeftInPixel.y ), // Top    Right
     };
 
     float2 Transformed = mul(Transform, float3(CornerPositionInPixel[Input.VertexId], 1.f)).xy;

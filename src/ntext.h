@@ -240,8 +240,8 @@ struct rasterized_buffer
 {
     void    *Data;
     uint32_t Stride;
-    uint32_t BufferWidth;
-    uint32_t BufferHeight;
+    uint32_t Width;
+    uint32_t Height;
     uint32_t BytesPerPixel;
 };
 
@@ -397,16 +397,16 @@ backend_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance
                 {
                     Result.Data          = Buffer;
                     Result.Stride        = Stride;
-                    Result.BufferWidth   = TextureWidth;
-                    Result.BufferHeight  = TextureHeight;
+                    Result.Width         = TextureWidth;
+                    Result.Height        = TextureHeight;
                     Result.BytesPerPixel = BytesPerPixel;
                 }
             }
 
-            // static int Counter = 0;
-            // wchar_t OutPath[64];
-            // swprintf(OutPath, 64, L"glyph_alpha_%d.bmp", Counter++);
-            // WriteGrayscaleBMP(OutPath, TextureWidth, TextureHeight, Buffer);
+             static int Counter = 0;
+             wchar_t OutPath[64];
+             swprintf(OutPath, 64, L"glyph_alpha_%d.bmp", Counter++);
+             WriteGrayscaleBMP(OutPath, TextureWidth, TextureHeight, Buffer);
         }
 
         RunAnalysis->Release();
@@ -453,10 +453,10 @@ struct packed_rectangle
 
 struct rectangle
 {
-    uint32_t Left;
-    uint32_t Top;
-    uint32_t Right;
-    uint32_t Bottom;
+    float Left;
+    float Top;
+    float Right;
+    float Bottom;
 };
 
 
@@ -1091,8 +1091,8 @@ static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
 
     // Packer
     {
-        uint16_t Width  = 1024;
-        uint16_t Height = 1024;
+        uint16_t Width  = 2048;
+        uint16_t Height = 2048;
 
         uint64_t Footprint = GetRectanglePackerFootprint(Width);
         void    *Memory    = PushArena(Generator.Arena, Footprint, AlignOf(void *));
@@ -1271,10 +1271,10 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 
                     rectangle Source =
                     {
-                        .Left   = Rectangle.X,
-                        .Top    = Rectangle.Y,
-                        .Right  = static_cast<uint16_t>(Rectangle.X + Rectangle.Width ),
-                        .Bottom = static_cast<uint16_t>(Rectangle.Y + Rectangle.Height),
+                        .Left   = static_cast<float>(Rectangle.X),
+                        .Top    = static_cast<float>(Rectangle.Y),
+                        .Right  = static_cast<float>(Rectangle.X + Rectangle.Width ),
+                        .Bottom = static_cast<float>(Rectangle.Y + Rectangle.Height),
                     };
 
                     // Shouldn't we check if this succeeded first?
