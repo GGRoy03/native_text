@@ -238,7 +238,7 @@ struct os_glyph_info
 
 struct rasterized_buffer
 {
-    void    *Buffer;
+    void    *Data;
     uint32_t Stride;
     uint32_t BufferWidth;
     uint32_t BufferHeight;
@@ -395,7 +395,7 @@ backend_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance
             {
                 if(RunAnalysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds, Buffer, BufferSize) == S_OK)
                 {
-                    Result.Buffer        = Buffer;
+                    Result.Data          = Buffer;
                     Result.Stride        = Stride;
                     Result.BufferWidth   = TextureWidth;
                     Result.BufferHeight  = TextureHeight;
@@ -683,7 +683,6 @@ struct glyph_entry
 
     uint32_t          PrevLRU;
     uint32_t          NextLRU;
-    uint32_t          NextFreeEntry;
 
     uint16_t          GlyphIndex;
     rectangle         Source;
@@ -696,17 +695,18 @@ struct glyph_table
 {
     uint8_t     *Metadata;
     glyph_entry *Buckets;
-    glyph_entry  Sentinel;
 
     uint64_t     GroupWidth;
     uint64_t     GroupCount;
     uint64_t     HashMask;
+
+    uint32_t     SentinelIndex;
 };
 
 
 struct glyph_state
 {
-    uint64_t          Id;
+    uint32_t          Id;
     uint16_t          GlyphIndex;
     glyph_layout_info LayoutInfo;
     rectangle         Source;
@@ -732,34 +732,18 @@ static glyph_entry *
 GetGlyphEntry(uint64_t Index, glyph_table *Table)
 {
     NTEXT_ASSERT(Table);
-    NTEXT_ASSERT(Index < (Table->GroupCount * Table->GroupWidth));
+    NTEXT_ASSERT(Index <= (Table->GroupCount * Table->GroupWidth)); // Could be sentinel.
 
     glyph_entry *Result = Table->Buckets + Index;
     return Result;
 }
 
-
-static uint32_t
-GetFreeGlyphEntry(glyph_table *Table)
+static glyph_entry *
+GetGlyphTableSentinel(glyph_table *Table)
 {
-    glyph_entry Sentinel = Table->Sentinel;
+    NTEXT_ASSERT(Table->SentinelIndex == Table->GroupCount * Table->GroupWidth);
 
-    if(Sentinel.NextFreeEntry == GlyphTableInvalidEntry)
-    {
-        NTEXT_ASSERT(!"Not Implemented");
-    }
-
-    uint32_t Result = Sentinel.NextFreeEntry;
-    NTEXT_ASSERT(Result != GlyphTableInvalidEntry);
-
-    glyph_entry *Entry = GetGlyphEntry(Result, Table);
-    Sentinel.NextFreeEntry = Entry->NextFreeEntry;
-    Entry->NextFreeEntry   = GlyphTableInvalidEntry;
-
-    NTEXT_ASSERT(Entry);
-    NTEXT_ASSERT(Entry->NextFreeEntry == GlyphTableInvalidEntry);
-    NTEXT_ASSERT(Entry == GetGlyphEntry(Result, Table));
-
+    glyph_entry *Result = Table->Buckets + Table->SentinelIndex;
     return Result;
 }
 
@@ -860,8 +844,8 @@ GetGlyphTableFootprint(glyph_table_params Params)
     uint64_t SlotCount = Params.GroupCount * static_cast<uint32_t>(Params.GroupWidth);
 
     uint64_t MetadataSize = SlotCount * sizeof(uint8_t);
-    uint64_t BucketsSize  = SlotCount * sizeof(glyph_entry);
-    uint64_t Result       = MetadataSize + BucketsSize + sizeof(glyph_table_params);
+    uint64_t BucketsSize  = (SlotCount + 1) * sizeof(glyph_entry); // Accounts for sentinel.
+    uint64_t Result       = MetadataSize + BucketsSize + sizeof(glyph_table);
 
     return Result;
 }
@@ -879,26 +863,18 @@ PlaceGlyphTableInMemory(glyph_table_params Params, void *Memory)
         uint8_t     *Metadata = static_cast<uint8_t *>(Memory);
         glyph_entry *Buckets  = reinterpret_cast<glyph_entry*>(Metadata + SlotCount);
 
-        Result = reinterpret_cast<glyph_table *>(Buckets + SlotCount);
-        Result->Metadata   = Metadata;
-        Result->Buckets    = Buckets;
-        Result->GroupWidth = static_cast<uint64_t>(Params.GroupWidth);
-        Result->GroupCount = Params.GroupCount;
-        Result->HashMask   = Params.GroupCount - 1; // This is only used to find the group index, not the slot index.
+        Result = reinterpret_cast<glyph_table *>(Buckets + SlotCount + 1); // Skip sentinel
+        Result->Metadata      = Metadata;
+        Result->Buckets       = Buckets;
+        Result->GroupWidth    = static_cast<uint64_t>(Params.GroupWidth);
+        Result->GroupCount    = Params.GroupCount;
+        Result->HashMask      = Params.GroupCount - 1; // Only used to find the group index, not the slot index
+        Result->SentinelIndex = SlotCount;
+
 
         for(uint32_t Idx = 0; Idx < SlotCount; ++Idx)
         {
             glyph_entry *Entry = GetGlyphEntry(Idx, Result);
-
-            if(Idx + 1 < SlotCount)
-            {
-                Entry->NextFreeEntry = Idx + 1;
-            }
-            else
-            {
-                Entry->NextFreeEntry = GlyphTableInvalidEntry;
-            }
-
             Entry->GlyphIndex   = 0;
             Entry->Source       = {};
             Entry->LayoutInfo   = {};
@@ -910,13 +886,19 @@ PlaceGlyphTableInMemory(glyph_table_params Params, void *Memory)
             Result->Metadata[Idx] = GlyphTableEmptyMask;
         }
 
-        Result->Sentinel.PrevLRU = GlyphTableInvalidEntry;
-        Result->Sentinel.NextLRU = GlyphTableInvalidEntry;
+        glyph_entry *Sentinel = GetGlyphTableSentinel(Result);
+        NTEXT_ASSERT(Sentinel);
+
+        Sentinel->PrevLRU = Result->SentinelIndex;
+        Sentinel->NextLRU = Result->SentinelIndex;
     }
 
     return Result;
 }
 
+
+// This will never trigger the LRU. Do we do some integer counting to figure out when it is full?
+// Simply recycle when we reach the maximum capacity? Sounds simple.
 
 static glyph_state
 FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
@@ -924,14 +906,14 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
     NTEXT_ASSERT(Table);
 
     glyph_entry *Result     = 0;
-    uint32_t     EntryIndex = 0;
+    uint32_t     EntryIndex = GlyphTableInvalidEntry;
 
     uint32_t ProbeCount = 0;
     uint32_t GroupIndex = GetGlyphGroupIndexFromHash(Hash, Table);
 
     NTEXT_ASSERT(GroupIndex < Table->GroupCount);
 
-    while(true)
+    while(!Result)
     {
         uint8_t  *Meta = Table->Metadata + (GroupIndex * Table->GroupWidth);
         glyph_tag Tag  = GetGlyphTagFromHash(Hash);
@@ -965,10 +947,11 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
             if(!EmptyMask)
             {
                 ProbeCount++;
-                GroupIndex = (GroupIndex + (ProbeCount * ProbeCount)) & (Table->GroupCount - 1);
+                GroupIndex = (GroupIndex + (ProbeCount * ProbeCount)) & Table->HashMask ;
             }
             else
             {
+                EntryIndex = FindFirstBit(EmptyMask) + (GroupIndex * Table->GroupWidth);
                 break;
             }
         }
@@ -981,38 +964,37 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
         glyph_entry *Prev = GetGlyphEntry(Result->PrevLRU, Table);
         glyph_entry *Next = GetGlyphEntry(Result->NextLRU, Table);
 
+        NTEXT_ASSERT(Prev);
+        NTEXT_ASSERT(Next);
+
         Prev->NextLRU = Result->NextLRU;
         Next->PrevLRU = Result->PrevLRU;
     }
     else
     {
-        // No existing entry was found, allocate a new one and link it into the chain.
-        // We also need to update the metadata array by clearing all state bits (empty and dead)
-        // and writing the tag.
+        // No existing entry was found, we simply allocate a new one by updating the metadata array.
 
-        EntryIndex = GetFreeGlyphEntry(Table);
         NTEXT_ASSERT(EntryIndex != GlyphTableInvalidEntry);
 
-        // Could the compiler optimize this into a single write? I believe the 0 write is necessary for the logic here.
-        uint8_t *Meta = Table->Metadata + EntryIndex;
-        *Meta = 0;                                  // Clear all bits.
-        *Meta = (GetGlyphTagFromHash(Hash).Value);  // Set the tag meta-data to the low 6 bits
+        // Since the tag is 00XX XXXX, we clear the state bits.
+        Table->Metadata[EntryIndex] = GetGlyphTagFromHash(Hash).Value;
 
         Result = GetGlyphEntry(EntryIndex, Table);
         Result->Hash = Hash;
     }
 
-    glyph_entry *Sentinel = &Table->Sentinel;
+    glyph_entry *Sentinel = GetGlyphTableSentinel(Table);
+    NTEXT_ASSERT(Sentinel && Result != Sentinel);
+
     Result->NextLRU = Sentinel->NextLRU;
-    Result->PrevLRU = GlyphTableInvalidEntry;
+    Result->PrevLRU = Table->SentinelIndex;
 
-    // The only case where this matters is when writing the first entry. Maybe a slightly better design would remove this branch.
-    if(Sentinel->NextLRU != GlyphTableInvalidEntry)
-    {
-        glyph_entry *LastNext = GetGlyphEntry(Sentinel->NextLRU, Table);
-        LastNext->PrevLRU = EntryIndex;
-    }
+    // The only case where this matters is when writing the first entry.
+    // Maybe a slightly better design would simplify this. How come the original code seems fine with just reading
+    // off of sentinel->next??
 
+    glyph_entry *Head = GetGlyphEntry(Sentinel->NextLRU, Table);
+    Head->PrevLRU     = EntryIndex;
     Sentinel->NextLRU = EntryIndex;
 
     glyph_state State = {};
@@ -1020,6 +1002,19 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
     State.Id           = EntryIndex;
 
     return State;
+}
+
+
+static void
+UpdateGlyphTableEntry(uint32_t Id, bool IsRasterized, uint16_t GlyphIndex, glyph_layout_info LayoutInfo, rectangle Source, glyph_table *Table)
+{
+    glyph_entry *Entry = GetGlyphEntry(Id, Table);
+    NTEXT_ASSERT(Entry);
+
+    Entry->IsRasterized = IsRasterized;
+    Entry->GlyphIndex   = GlyphIndex;
+    Entry->LayoutInfo   = LayoutInfo;
+    Entry->Source       = Source;
 }
 
 
@@ -1143,6 +1138,26 @@ enum class TextureFormat
 };
 
 
+struct rasterized_glyph
+{
+    rectangle         Source;
+    rasterized_buffer Buffer;
+};
+
+struct rasterized_glyph_node
+{
+    rasterized_glyph_node *Next;
+    rasterized_glyph       Value;
+};
+
+struct rasterized_glyph_list
+{
+    rasterized_glyph_node *First;
+    rasterized_glyph_node *Last;
+    uint32_t               Count;
+};
+
+
 static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
 {
     switch(Format)
@@ -1167,9 +1182,11 @@ static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
 }
 
 
-static void
+static rasterized_glyph_list
 FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 {
+    rasterized_glyph_list List = {};
+
     uint32_t Advance     = 16;
     __m128i  ComplexByte = _mm_set1_epi8(0x80);
 
@@ -1246,21 +1263,54 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 
                 if(Rectangle.WasPacked)
                 {
-                    rasterized_buffer Buffer = Generator.Backend.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);
-                    // TODO: Figure out what to do with the buffer. (And what to store as well)
+                    rectangle Source = {};
 
-                    // TODO: Update the table.
+                    // Shouldn't we check if this succeeded first?
+                    rasterized_buffer Buffer = Generator.Backend.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);
+
+                    rasterized_glyph_node *Node = PushStruct(Generator.Arena, rasterized_glyph_node);
+                    if(Node)
+                    {
+                        Node->Value.Buffer = Buffer;
+                        Node->Value.Source = Source;
+
+                        if(!List.First)
+                        {
+                            List.First = Node;
+                        }
+
+                        if(List.Last)
+                        {
+                            List.Last->Next = Node;
+                        }
+
+                        List.Last   = Node;
+                        List.Count += 1;
+                    }
+
+                    // Should we only update in the case that we allocated the node? That is a weird case.
+
+                    glyph_layout_info LayoutInfo =
+                    {
+                        .Advance = Info.Advance,
+                        .OffsetX = Info.OffsetX,
+                        .OffsetY = Info.OffsetY,
+                    };
+
+                    UpdateGlyphTableEntry(State.Id, 1, Info.GlyphIndex, LayoutInfo, Source, Generator.GlyphTable);
                 }
             }
         }
     }
+
+    return List;
 }
 
 
-static void
+static rasterized_glyph_list
 FillAtlas(const char *Data, uint64_t Count, glyph_generator &Generator)
 {
-    FillAtlas((char *)Data, Count, Generator);
+    return FillAtlas((char *)Data, Count, Generator);
 }
 
 

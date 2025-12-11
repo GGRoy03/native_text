@@ -1,6 +1,5 @@
 #include "src/ntext.h"
-
-#define ASSERT(Cond) do {if (!(Cond)) __assume(0);} while (0)
+#include "renderers/renderer.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -73,14 +72,14 @@ Win32Sleep(DWORD Time)
     Sleep(Time);
 }
 
-#include "./renderers/d3d11/d3d11.h"
-
 int main()
 {
     HWND HWindow = Win32Init(1920, 1080);
 
     d3d11_renderer Renderer;
     Renderer.Init(HWindow, 1920, 1080);
+
+    // We need to specify the texture size here probably. Unsure where they are chosen from right now.
 
     ntext::glyph_generator_params Params = {};
     {
@@ -91,7 +90,13 @@ int main()
 
     ntext::glyph_generator Generator = ntext::CreateGlyphGenerator(Params);
 
-    ntext::FillAtlas("Hello.", sizeof("Hello") - 1, Generator);
+    
+    // This will return a list of buffers which we need to copy into our render texture.
+    // Every frame, simply render it.
+    ntext::rasterized_glyph_list List = ntext::FillAtlas("Hello.", sizeof("Hello") - 1, Generator);
+    
+    // Copy the data into the texture.
+    Renderer.UpdateTextCache(List);
 
     while(true)
     {
