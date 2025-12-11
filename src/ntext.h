@@ -453,10 +453,10 @@ struct packed_rectangle
 
 struct rectangle
 {
-    uint16_t Left;
-    uint16_t Top;
-    uint16_t Right;
-    uint16_t Bottom;
+    uint32_t Left;
+    uint32_t Top;
+    uint32_t Right;
+    uint32_t Bottom;
 };
 
 
@@ -632,9 +632,13 @@ PackRectangle(packed_rectangle &Rectangle, rectangle_packer *Packer)
         Packer->Skyline[BestIndexInclusive + 1] = NewBotRight;
     }
 
+    // This is kind of a hack. Unsure why this work since I do not fully remember how this algorithm works.
+    // The caller assumes that we return the bottom left and this looks like it does the trick?
+    // No it doesn't. Wait I am confused.
+
     Rectangle.WasPacked = 1;
     Rectangle.X         = NewTopLeft.X;
-    Rectangle.Y         = NewTopLeft.Y;
+    Rectangle.Y         = NewBotRight.Y;
 }
 
 
@@ -989,10 +993,6 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
     Result->NextLRU = Sentinel->NextLRU;
     Result->PrevLRU = Table->SentinelIndex;
 
-    // The only case where this matters is when writing the first entry.
-    // Maybe a slightly better design would simplify this. How come the original code seems fine with just reading
-    // off of sentinel->next??
-
     glyph_entry *Head = GetGlyphEntry(Sentinel->NextLRU, Table);
     Head->PrevLRU     = EntryIndex;
     Sentinel->NextLRU = EntryIndex;
@@ -1253,6 +1253,8 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
             {
                 os_glyph_info Info = Generator.Backend.FindGlyphInformation((uint32_t)Data[Idx], 16.f);
 
+                // This cast is wrong/dangerous. Should probably round up or allow floating points in the packer?
+
                 packed_rectangle Rectangle =
                 {
                     .Width  = static_cast<uint16_t>(Info.SizeX),
@@ -1263,7 +1265,17 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 
                 if(Rectangle.WasPacked)
                 {
-                    rectangle Source = {};
+                    // This cast is wrong/dangerous. Should probably round up or allow floating points in the packer?
+                    
+                    // This is just wrong. At least, what we return from the packer is confusing.
+
+                    rectangle Source =
+                    {
+                        .Left   = Rectangle.X,
+                        .Top    = Rectangle.Y,
+                        .Right  = static_cast<uint16_t>(Rectangle.X + Rectangle.Width ),
+                        .Bottom = static_cast<uint16_t>(Rectangle.Y + Rectangle.Height),
+                    };
 
                     // Shouldn't we check if this succeeded first?
                     rasterized_buffer Buffer = Generator.Backend.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);

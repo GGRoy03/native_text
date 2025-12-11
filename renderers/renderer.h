@@ -11,6 +11,7 @@ public:
     virtual void Present  ()                                          = 0;
 
     virtual void UpdateTextCache  (const ntext::rasterized_glyph_list &List) = 0;
+    virtual void DrawTextToScreen (void)                                     = 0;
 };
 
 #include "./d3d11/d3d11.h"

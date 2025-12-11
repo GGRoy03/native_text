@@ -16,25 +16,58 @@ class d3d11_renderer : public IRenderer
 {
 
 public:
-    void Init            (void *WindowHandle, int Width, int Height)  override;
-    void Clear           (float R, float G, float B, float A)         override;
-    void Present         ()                                           override;
-    void UpdateTextCache (const ntext::rasterized_glyph_list &List)  override;
+    void Init             (void *WindowHandle, int Width, int Height)  override;
+    void Clear            (float R, float G, float B, float A)         override;
+    void Present          ()                                           override;
+    void UpdateTextCache  (const ntext::rasterized_glyph_list &List)   override;
+    void DrawTextToScreen (void)                                       override;
 
 private:
-    ID3D11Device           *Device;
-    ID3D11DeviceContext    *DeviceContext;
-    IDXGISwapChain1        *SwapChain;
-    ID3D11RenderTargetView *RenderView;
-    ID3D11BlendState       *DefaultBlendState;
-    ID3D11SamplerState     *AtlasSamplerState;
-    ID3D11RasterizerState  *RasterState;
-    ID3D11VertexShader     *VtxShader;
-    ID3D11PixelShader      *PxlShader;
+
+    // Objects
+    ID3D11Device             *Device;
+    ID3D11DeviceContext      *DeviceContext;
+    IDXGISwapChain1          *SwapChain;
+    ID3D11RenderTargetView   *RenderView;
+    ID3D11BlendState         *DefaultBlendState;
+    ID3D11SamplerState       *AtlasSamplerState;
+    ID3D11RasterizerState    *RasterState;
+    D3D11_VIEWPORT            Viewport;
 
     // Text Stuff
-    ID3D11Texture2D                *AtlasTexture;
-    ID3D11ShaderResourceView       *AtlasSRV;
+    ID3D11VertexShader       *VtxShader;
+    ID3D11PixelShader        *PxlShader;
+    ID3D11Texture2D          *AtlasTexture;
+    ID3D11ShaderResourceView *AtlasSRV;
+    ID3D11Buffer             *ConstantBuffer;
+    ID3D11InputLayout        *InputLayout;
+    ID3D11Buffer             *VertexBuffer;
+
+    // State
+    float                    ViewportWidth;
+    float                    ViewportHeight;
+    float                    AtlasWidth;
+    float                    AtlasHeight;
+
+    struct constant_buffer
+    {
+        float TransformRow0[4];
+        float TransformRow1[4];
+        float TransformRow2[4];
+
+        float ViewportSize[2];
+        float _Pad0[2];
+
+        float AtlasSize[2];
+        float _Pad1[2];
+    };
+
+    struct glyph_vertex
+    {
+        ntext::rectangle Bounds;
+        ntext::rectangle Source;
+        float            R, G, B, A;
+    };
 };
 
 void d3d11_renderer::Init(void *WindowHandle, int Width, int Height)
@@ -50,6 +83,13 @@ void d3d11_renderer::Init(void *WindowHandle, int Width, int Height)
     this->PxlShader        = nullptr;
     this->AtlasTexture     = nullptr;
     this->AtlasSRV         = nullptr;
+    this->ConstantBuffer  = nullptr;
+
+    this->ViewportWidth    = (float)Width;
+    this->ViewportHeight   = (float)Height;
+
+    this->AtlasWidth       = 2048.0f;
+    this->AtlasHeight      = 2048.0f;
 
     UINT              CreateFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG;
     D3D_FEATURE_LEVEL Levels[]    = { D3D_FEATURE_LEVEL_11_0 };
@@ -146,15 +186,15 @@ void d3d11_renderer::Init(void *WindowHandle, int Width, int Height)
 
     {
         D3D11_TEXTURE2D_DESC AtlasDesc = {};
-        AtlasDesc.Width          = 2048; // atlas size - change as you need
-        AtlasDesc.Height         = 2048;
+        AtlasDesc.Width          = this->AtlasWidth;
+        AtlasDesc.Height         = this->AtlasHeight;
         AtlasDesc.MipLevels      = 1;
         AtlasDesc.ArraySize      = 1;
         AtlasDesc.Format         = DXGI_FORMAT_R8G8B8A8_UNORM;
         AtlasDesc.SampleDesc.Count = 1;
-        AtlasDesc.Usage          = D3D11_USAGE_DYNAMIC;                 // so CPU can map it
-        AtlasDesc.BindFlags      = D3D11_BIND_SHADER_RESOURCE;         // shaders can sample it
-        AtlasDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;             // allow Map for writing
+        AtlasDesc.Usage          = D3D11_USAGE_DYNAMIC;
+        AtlasDesc.BindFlags      = D3D11_BIND_SHADER_RESOURCE;
+        AtlasDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         AtlasDesc.MiscFlags      = 0;
 
         HRESULT hr = this->Device->CreateTexture2D(&AtlasDesc, nullptr, &this->AtlasTexture);
@@ -169,6 +209,57 @@ void d3d11_renderer::Init(void *WindowHandle, int Width, int Height)
         hr = this->Device->CreateShaderResourceView(this->AtlasTexture, &SRVDesc, &this->AtlasSRV);
         ASSERT(SUCCEEDED(hr) && this->AtlasSRV);
     }
+
+    {
+        D3D11_INPUT_ELEMENT_DESC LayoutDesc[] =
+        {
+            { "POS",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 }, // Bounds
+            { "FONT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 }, // Source
+            { "COL",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 }, // Color (R,G,B,A)
+        };
+
+        HRESULT hr = this->Device->CreateInputLayout(LayoutDesc, ARRAYSIZE(LayoutDesc), D3D11VtxShaderBytes, sizeof(D3D11VtxShaderBytes), &this->InputLayout);
+
+        ASSERT(SUCCEEDED(hr) && this->InputLayout);
+    }
+
+    {
+        D3D11_BUFFER_DESC BufferDesc = {};
+        BufferDesc.Usage          = D3D11_USAGE_DYNAMIC;
+        BufferDesc.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+        BufferDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        BufferDesc.MiscFlags      = 0;
+        BufferDesc.ByteWidth      = sizeof(constant_buffer);
+
+        ASSERT((BufferDesc.ByteWidth % 16) == 0);
+
+        HRESULT hr = this->Device->CreateBuffer(&BufferDesc, nullptr, &this->ConstantBuffer);
+        ASSERT(SUCCEEDED(hr) && this->ConstantBuffer);
+    }
+
+    {
+        size_t VertexBufferSize = 64 * 1024;
+
+        D3D11_BUFFER_DESC BufferDesc = {};
+        BufferDesc.Usage = D3D11_USAGE_DEFAULT;
+        BufferDesc.ByteWidth = (UINT)VertexBufferSize;
+        BufferDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        BufferDesc.CPUAccessFlags = 0;
+        BufferDesc.MiscFlags = 0;
+        BufferDesc.StructureByteStride = 0;
+
+        HRESULT hr = this->Device->CreateBuffer(&BufferDesc, nullptr, &this->VertexBuffer);
+        ASSERT(SUCCEEDED(hr) && this->VertexBuffer);
+    }
+
+    {
+        this->Viewport.TopLeftX = 0.0f;
+        this->Viewport.TopLeftY = 0.0f;
+        this->Viewport.Width    = this->ViewportWidth;
+        this->Viewport.Height   = this->ViewportHeight;
+        this->Viewport.MinDepth = 0.0f;
+        this->Viewport.MaxDepth = 1.0f;
+    }
 }
 
 void d3d11_renderer::Clear(float R, float G, float B, float A)
@@ -176,6 +267,10 @@ void d3d11_renderer::Clear(float R, float G, float B, float A)
     float Color[4] = { R, G, B, A };
     this->DeviceContext->ClearRenderTargetView(this->RenderView, Color);
 }
+
+// So this is bugged. Which is fine. We can (hopefully) easily debug it using RenderDocs.
+// I haven't checked any of the code relating to this (or the buffer generation)
+// Hopefully this is simpler than this stub implementation.
 
 void d3d11_renderer::UpdateTextCache(const ntext::rasterized_glyph_list &List)
 {
@@ -232,6 +327,56 @@ void d3d11_renderer::UpdateTextCache(const ntext::rasterized_glyph_list &List)
     }
 
     this->DeviceContext->Unmap(this->AtlasTexture, 0);
+}
+
+void d3d11_renderer::DrawTextToScreen(void)
+{
+    // Update constants
+    constant_buffer ConstantBuffer = {};
+    ConstantBuffer.TransformRow0[0] = 1.0f; ConstantBuffer.TransformRow0[1] = 0.0f; ConstantBuffer.TransformRow0[2] = 0.0f; ConstantBuffer.TransformRow0[3] = 0.0f;
+    ConstantBuffer.TransformRow1[0] = 0.0f; ConstantBuffer.TransformRow1[1] = 1.0f; ConstantBuffer.TransformRow1[2] = 0.0f; ConstantBuffer.TransformRow1[3] = 0.0f;
+    ConstantBuffer.TransformRow2[0] = 0.0f; ConstantBuffer.TransformRow2[1] = 0.0f; ConstantBuffer.TransformRow2[2] = 1.0f; ConstantBuffer.TransformRow2[3] = 0.0f;
+
+    ConstantBuffer.ViewportSize[0] = this->ViewportWidth;
+    ConstantBuffer.ViewportSize[1] = this->ViewportHeight;
+
+    ConstantBuffer.AtlasSize[0] = this->AtlasWidth;
+    ConstantBuffer.AtlasSize[1] = this->AtlasHeight;
+
+    D3D11_MAPPED_SUBRESOURCE MappedBuffer = {};
+    HRESULT HR = this->DeviceContext->Map(this->ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedBuffer);
+    ASSERT(SUCCEEDED(HR) && MappedBuffer.pData);
+    memcpy(MappedBuffer.pData, &ConstantBuffer, sizeof(ConstantBuffer));
+    this->DeviceContext->Unmap(this->ConstantBuffer, 0);
+
+    // Input Assembler State
+    UINT Stride = sizeof(glyph_vertex);
+    UINT Offset = 0;
+    this->DeviceContext->IASetVertexBuffers(0, 1, &this->VertexBuffer, &Stride, &Offset);
+    this->DeviceContext->IASetInputLayout(this->InputLayout);
+    this->DeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    // Output Merger State
+    float BlendFactor[4] = {0,0,0,0};
+    this->DeviceContext->OMSetBlendState(this->DefaultBlendState, BlendFactor, 0xffffffff);
+    this->DeviceContext->OMSetRenderTargets(1, &this->RenderView, nullptr);
+
+    // Vertex Shader State
+    this->DeviceContext->VSSetShader(this->VtxShader, nullptr, 0);
+    this->DeviceContext->VSSetConstantBuffers(0, 1, &this->ConstantBuffer);
+
+    // Pixel Shader State
+    this->DeviceContext->PSSetShader(this->PxlShader, nullptr, 0);
+    this->DeviceContext->PSSetConstantBuffers(0, 1, &this->ConstantBuffer);
+    this->DeviceContext->PSSetShaderResources(0, 1, &this->AtlasSRV);
+    this->DeviceContext->PSSetSamplers(0, 1, &this->AtlasSamplerState);
+
+    // Raster State
+    this->DeviceContext->RSSetState(this->RasterState);
+    this->DeviceContext->RSSetViewports(1, &this->Viewport);
+
+    // Draw
+    this->DeviceContext->Draw(1, 0);
 }
 
 void d3d11_renderer::Present()
