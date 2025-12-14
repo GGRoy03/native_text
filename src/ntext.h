@@ -716,7 +716,7 @@ struct glyph_entry
 
     uint16_t          GlyphIndex;
     rectangle         Source;
-    glyph_layout_info LayoutInfo;
+    glyph_layout_info Layout;
     bool              IsRasterized;
 };
 
@@ -738,7 +738,7 @@ struct glyph_state
 {
     uint32_t          Id;
     uint16_t          GlyphIndex;
-    glyph_layout_info LayoutInfo;
+    glyph_layout_info Layout;
     rectangle         Source;
     bool              IsRasterized;
 };
@@ -901,13 +901,12 @@ PlaceGlyphTableInMemory(glyph_table_params Params, void *Memory)
         Result->HashMask      = Params.GroupCount - 1; // Only used to find the group index, not the slot index
         Result->SentinelIndex = SlotCount;
 
-
         for(uint32_t Idx = 0; Idx < SlotCount; ++Idx)
         {
             glyph_entry *Entry = GetGlyphEntry(Idx, Result);
             Entry->GlyphIndex   = 0;
             Entry->Source       = {};
-            Entry->LayoutInfo   = {};
+            Entry->Layout       = {};
             Entry->IsRasterized = false;
         }
 
@@ -1023,15 +1022,20 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
     Head->PrevLRU     = EntryIndex;
     Sentinel->NextLRU = EntryIndex;
 
-    glyph_state State = {};
-    State.IsRasterized = Result->IsRasterized;
-    State.Id           = EntryIndex;
+    glyph_state State =
+    {
+        .Id           = EntryIndex,
+        .GlyphIndex   = Result->GlyphIndex,
+        .Layout       = Result->Layout,
+        .Source       = Result->Source,
+        .IsRasterized = Result->IsRasterized,
+    };
 
     return State;
 }
 
 
-static void
+static glyph_state
 UpdateGlyphTableEntry(uint32_t Id, bool IsRasterized, uint16_t GlyphIndex, glyph_layout_info LayoutInfo, rectangle Source, glyph_table *Table)
 {
     glyph_entry *Entry = GetGlyphEntry(Id, Table);
@@ -1039,8 +1043,19 @@ UpdateGlyphTableEntry(uint32_t Id, bool IsRasterized, uint16_t GlyphIndex, glyph
 
     Entry->IsRasterized = IsRasterized;
     Entry->GlyphIndex   = GlyphIndex;
-    Entry->LayoutInfo   = LayoutInfo;
+    Entry->Layout       = LayoutInfo;
     Entry->Source       = Source;
+
+    glyph_state State =
+    {
+        .Id           = Id,
+        .GlyphIndex   = GlyphIndex,
+        .Layout       = LayoutInfo,
+        .Source       = Source,
+        .IsRasterized = IsRasterized,
+    };
+    
+    return State;
 }
 
 
@@ -1171,11 +1186,13 @@ struct rasterized_glyph
     rasterized_buffer Buffer;
 };
 
+
 struct rasterized_glyph_node
 {
     rasterized_glyph_node *Next;
     rasterized_glyph       Value;
 };
+
 
 struct rasterized_glyph_list
 {
@@ -1184,12 +1201,22 @@ struct rasterized_glyph_list
     uint32_t               Count;
 };
 
+
+struct shaped_glyph
+{
+    uint16_t          GlyphIndex;
+    rectangle         Source;
+    glyph_layout_info Layout;
+};
+
+
 struct shaped_glyph_run
 {
-    rasterized_glyph_list RasterizedList;
-    glyph_layout_info    *LayoutBuffer;
-    uint32_t              LayoutBufferSize;
+    rasterized_glyph_list UpdateList;
+    shaped_glyph         *Shaped;
+    uint32_t              ShapedCount;
 };
+
 
 static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
 {
@@ -1220,7 +1247,7 @@ static shaped_glyph_run
 FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 {
     shaped_glyph_run Run = {};
-    Run.LayoutBuffer = PushArray<glyph_layout_info>(Generator.Arena, Count);
+    Run.Shaped = PushArray<shaped_glyph>(Generator.Arena, Count);
 
     uint32_t Advance     = 16;
     __m128i  ComplexByte = _mm_set1_epi8(0x80);
@@ -1284,8 +1311,6 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
             glyph_hash  Hash  = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
             glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
 
-            glyph_layout_info LayoutInfo = {};
-
             if(!State.IsRasterized)
             {
                 os_glyph_info Info = Generator.Backend.FindGlyphInformation((uint32_t)Data[Idx], 16.f);
@@ -1302,8 +1327,6 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 
                 if(Rectangle.WasPacked)
                 {
-                    // This cast is wrong/dangerous. Should probably round up or allow floating points in the packer?
-                    
                     // This is just wrong. At least, what we return from the packer is confusing.
 
                     rectangle Source =
@@ -1315,48 +1338,48 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
                     };
 
                     // Shouldn't we check if this succeeded first?
+                    // What about white-spaces. How do we treat them?
+
                     rasterized_buffer Buffer = Generator.Backend.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);
 
-                    auto *Node = PushStruct<rasterized_glyph_node>(Generator.Arena);
-                    if(Node)
+                    if(Buffer.BytesPerPixel == 1 && Buffer.Data)
                     {
-                        rasterized_glyph_list &List = Run.RasterizedList;
-
-                        Node->Value.Buffer = Buffer;
-                        Node->Value.Source = Source;
-
-                        if(!List.First)
+                        auto *Node = PushStruct<rasterized_glyph_node>(Generator.Arena);
+                        if(Node)
                         {
-                            List.First = Node;
+                            rasterized_glyph_list &List = Run.UpdateList;
+    
+                            Node->Value.Buffer = Buffer;
+                            Node->Value.Source = Source;
+    
+                            if(!List.First)
+                            {
+                                List.First = Node;
+                            }
+    
+                            if(List.Last)
+                            {
+                                List.Last->Next = Node;
+                            }
+    
+                            List.Last   = Node;
+                            List.Count += 1;
                         }
-
-                        if(List.Last)
-                        {
-                            List.Last->Next = Node;
-                        }
-
-                        List.Last   = Node;
-                        List.Count += 1;
                     }
 
-                    // Should we only update in the case that we allocated the node? That is a weird case.
-
-                    LayoutInfo =
+                    glyph_layout_info LayoutInfo =
                     {
                         .Advance = Info.Advance,
                         .OffsetX = Info.OffsetX,
                         .OffsetY = Info.OffsetY,
                     };
 
-                    UpdateGlyphTableEntry(State.Id, 1, Info.GlyphIndex, LayoutInfo, Source, Generator.GlyphTable);
+                    State = UpdateGlyphTableEntry(State.Id, 1, Info.GlyphIndex, LayoutInfo, Source, Generator.GlyphTable);
                 }
             }
-            else
-            {
-                LayoutInfo = State.LayoutInfo;
-            }
 
-            Run.LayoutBuffer[Run.LayoutBufferSize++] = LayoutInfo;
+            // This is, because it assumes that we always succeed? Maybe check if state is valid.
+            Run.Shaped[Run.ShapedCount++] = {.GlyphIndex = State.GlyphIndex, .Source = State.Source, .Layout = State.Layout};
         }
     }
 
