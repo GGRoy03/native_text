@@ -121,6 +121,8 @@ PushArena(memory_arena *Arena, uint64_t Size, uint64_t Alignment)
 static void
 ClearArena(memory_arena *Arena)
 {
+    NTEXT_ASSERT(Arena);
+
     Arena->Position = sizeof(memory_arena);
 }
 
@@ -128,6 +130,8 @@ ClearArena(memory_arena *Arena)
 static uint64_t
 GetArenaPosition(memory_arena *Arena)
 {
+    NTEXT_ASSERT(Arena);
+
     uint64_t Result = Arena->BasePosition + Arena->Position;
     return Result;
 }
@@ -136,6 +140,8 @@ GetArenaPosition(memory_arena *Arena)
 static memory_region
 EnterMemoryRegion(memory_arena *Arena)
 {
+    NTEXT_ASSERT(Arena);
+
     memory_region Result;
     Result.Arena    = Arena;
     Result.Position = GetArenaPosition(Arena);
@@ -147,15 +153,34 @@ EnterMemoryRegion(memory_arena *Arena)
 static void
 LeaveMemoryRegion(memory_region Region)
 {
+    NTEXT_ASSERT(Region.Arena);
+
     Region.Arena->Position = Region.Position;
 }
 
+template <typename T>
+constexpr T* PushArrayNoZeroAligned(memory_arena* Arena, uint64_t Count, uint64_t Align)
+{
+    return static_cast<T*>(PushArena(Arena, sizeof(T) * Count, Align));
+}
 
-#define PushArrayNoZeroAligned(a, T, c, align) (T *)PushArena((a), sizeof(T)*(c), (align))
-#define PushArrayAligned(a, T, c, align) PushArrayNoZeroAligned(a, T, c, align)
-#define PushArray(a, T, c) PushArrayAligned(a, T, c, max(8, AlignOf(T)))
-#define PushStruct(a, T)   PushArrayAligned(a, T, 1, max(8, AlignOf(T)))
+template <typename T>
+constexpr T* PushArrayAligned(memory_arena* Arena, uint64_t Count, uint64_t Align)
+{
+    return PushArrayNoZeroAligned<T>(Arena, Count, Align);
+}
 
+template <typename T>
+constexpr T* PushArray(memory_arena* Arena, uint64_t Count)
+{
+    return PushArrayAligned<T>(Arena, Count, max(8, alignof(T)));
+}
+
+template <typename T>
+constexpr T* PushStruct(memory_arena* Arena)
+{
+    return PushArray<T>(Arena, 1);
+}
 
 // ==================================================================================
 // @Internal : Win32 Implementation
@@ -306,19 +331,18 @@ bool backend_context::IsValid()
 }
 
 
+// TODO: Error checking
+
 os_glyph_info
 backend_context::FindGlyphInformation(uint32_t CodePoint, float EmSize)
 {
-    HRESULT Hr = S_OK;
-
     IDWriteFontFace *FontFace = this->Font;
-    IDWriteFactory  *DWrite   = this->DirectWrite;
 
     UINT16 GlyphIndex = 0;
-    Hr = FontFace->GetGlyphIndices(&CodePoint, 1, &GlyphIndex);
+    FontFace->GetGlyphIndices(&CodePoint, 1, &GlyphIndex);
 
     DWRITE_GLYPH_METRICS GlyphMetrics = {};
-    Hr = FontFace->GetDesignGlyphMetrics(&GlyphIndex, 1, &GlyphMetrics, FALSE);
+    FontFace->GetDesignGlyphMetrics(&GlyphIndex, 1, &GlyphMetrics, FALSE);
 
     DWRITE_FONT_METRICS FontMetrics = {};
     FontFace->GetMetrics(&FontMetrics);
@@ -345,6 +369,8 @@ backend_context::FindGlyphInformation(uint32_t CodePoint, float EmSize)
     return Result;
 }
 
+// TODO: Error Checking
+
 rasterized_buffer
 backend_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance, float EmSize, memory_arena *Arena)
 {
@@ -357,7 +383,7 @@ backend_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance
 
     UINT16              GlyphIndices[1] = {GlyphIndex};
     FLOAT               Advances[1]     = {Advance};
-    DWRITE_GLYPH_OFFSET Offsets[1]      = {0.f, 0.f};
+    DWRITE_GLYPH_OFFSET Offsets[1]      = {{0.f, 0.f}};
 
     DWRITE_GLYPH_RUN GlyphRun =
     {
@@ -390,7 +416,7 @@ backend_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance
             int      Stride        = TextureWidth * BytesPerPixel;
             uint32_t BufferSize    = TextureWidth * TextureHeight * BytesPerPixel;
 
-            BYTE *Buffer = PushArray(Arena, BYTE, BufferSize);
+            BYTE *Buffer = PushArray<BYTE>(Arena, BufferSize);
             if(Buffer)
             {
                 if(RunAnalysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds, Buffer, BufferSize) == S_OK)
@@ -1035,6 +1061,8 @@ struct glyph_generator_params
     TextStorage TextStorage;
     uint64_t    FrameMemoryBudget;
     void       *FrameMemory;
+    uint16_t    CacheSizeX;
+    uint16_t    CacheSizeY;
 };
 
 
@@ -1051,6 +1079,8 @@ struct glyph_generator
     TextStorage       TextStorage;
     backend_context   Backend;
 };
+
+// Should we add a function to get the static footprint for the glyph generator?
 
 
 static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
@@ -1091,13 +1121,10 @@ static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
 
     // Packer
     {
-        uint16_t Width  = 2048;
-        uint16_t Height = 2048;
-
-        uint64_t Footprint = GetRectanglePackerFootprint(Width);
+        uint64_t Footprint = GetRectanglePackerFootprint(Params.CacheSizeX);
         void    *Memory    = PushArena(Generator.Arena, Footprint, AlignOf(void *));
 
-        Generator.Packer = PlaceRectanglePackerInMemory(Width, Height, Memory);
+        Generator.Packer = PlaceRectanglePackerInMemory(Params.CacheSizeX, Params.CacheSizeY, Memory);
 
         NTEXT_ASSERT(Generator.Packer);
     }
@@ -1157,6 +1184,12 @@ struct rasterized_glyph_list
     uint32_t               Count;
 };
 
+struct shaped_glyph_run
+{
+    rasterized_glyph_list RasterizedList;
+    glyph_layout_info    *LayoutBuffer;
+    uint32_t              LayoutBufferSize;
+};
 
 static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
 {
@@ -1181,11 +1214,13 @@ static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
     }
 }
 
+// TODO: Error checks.
 
-static rasterized_glyph_list
+static shaped_glyph_run
 FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 {
-    rasterized_glyph_list List = {};
+    shaped_glyph_run Run = {};
+    Run.LayoutBuffer = PushArray<glyph_layout_info>(Generator.Arena, Count);
 
     uint32_t Advance     = 16;
     __m128i  ComplexByte = _mm_set1_epi8(0x80);
@@ -1249,6 +1284,8 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
             glyph_hash  Hash  = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
             glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
 
+            glyph_layout_info LayoutInfo = {};
+
             if(!State.IsRasterized)
             {
                 os_glyph_info Info = Generator.Backend.FindGlyphInformation((uint32_t)Data[Idx], 16.f);
@@ -1280,9 +1317,11 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
                     // Shouldn't we check if this succeeded first?
                     rasterized_buffer Buffer = Generator.Backend.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);
 
-                    rasterized_glyph_node *Node = PushStruct(Generator.Arena, rasterized_glyph_node);
+                    auto *Node = PushStruct<rasterized_glyph_node>(Generator.Arena);
                     if(Node)
                     {
+                        rasterized_glyph_list &List = Run.RasterizedList;
+
                         Node->Value.Buffer = Buffer;
                         Node->Value.Source = Source;
 
@@ -1302,7 +1341,7 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
 
                     // Should we only update in the case that we allocated the node? That is a weird case.
 
-                    glyph_layout_info LayoutInfo =
+                    LayoutInfo =
                     {
                         .Advance = Info.Advance,
                         .OffsetX = Info.OffsetX,
@@ -1312,14 +1351,20 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
                     UpdateGlyphTableEntry(State.Id, 1, Info.GlyphIndex, LayoutInfo, Source, Generator.GlyphTable);
                 }
             }
+            else
+            {
+                LayoutInfo = State.LayoutInfo;
+            }
+
+            Run.LayoutBuffer[Run.LayoutBufferSize++] = LayoutInfo;
         }
     }
 
-    return List;
+    return Run;
 }
 
 
-static rasterized_glyph_list
+static shaped_glyph_run
 FillAtlas(const char *Data, uint64_t Count, glyph_generator &Generator)
 {
     return FillAtlas((char *)Data, Count, Generator);

@@ -92,11 +92,20 @@ int main()
 
     
     // This will return a list of buffers which we need to copy into our render texture.
-    // Every frame, simply render it.
-    ntext::rasterized_glyph_list List = ntext::FillAtlas("Hello.", sizeof("Hello") - 1, Generator);
+    ntext::shaped_glyph_run Run = ntext::FillAtlas("Hello.", sizeof("Hello") - 1, Generator);
+
+    // So like do you have to iterate it twice to "save" the glyph informations?
+    // Won't even work, because we do not have enough information. If we were to push information into the list
+    // for every glyph in the string, then we could return a buffer and let the user iterate twice? Or once
+    // and and change how we rasterize? Uhm. Uhm. We'd just copy into some user struct, ui_text: buffer of
+    // glyphs... Uhmmmm. Iterate twice. Really? I think, just return two distincts collections.
+    // One containing all of the glyph layout information (with glyph index)
+
+    // Iterate1:StoreData
+    // Iterate2:Rasterize
     
-    // Copy the data into the texture.
-    Renderer.UpdateTextCache(List);
+    // Use the newly rasterized list to copy into the buffer.
+    Renderer.UpdateTextCache(Run.RasterizedList);
 
     while(true)
     {
