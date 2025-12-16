@@ -1412,7 +1412,6 @@ AnalyzeText(char *Data, uint64_t Size, TextAnalysis Flags, glyph_generator &Gene
                     ++CodepointIdx;
                 }
             }
-
         }
     }
 
