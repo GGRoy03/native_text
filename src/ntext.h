@@ -49,7 +49,7 @@ static inline unsigned FindFirstBit(uint32_t Mask)
 #if NTEXT_MSVC || NTEXT_CLANG
     #define AlignOf(T) __alignof(T)
 #elif NTEXT_GNU
-    #define AlignOf(T) __alignof(T)__
+#define AlignOf(T) __alignof(T)__
 #else
     #error "AlignOf not supported for this compiler"
 #endif
@@ -802,19 +802,25 @@ static char unsigned DefaultSeed[16] =
 };
 
 
+// No clue how good (bad) this is bad. Trying something.
+
 static glyph_hash
-ComputeGlyphHash(size_t Count, char unsigned *At, char unsigned *Seedx16)
+ComputeGlyphHash(size_t Count, uint32_t *Codepoints, void *Owner, char unsigned *Seedx16)
 {
+    NTEXT_ASSERT(Count);
+    NTEXT_ASSERT(Codepoints);
+    NTEXT_ASSERT(Seedx16);
+
     glyph_hash Result = {0};
 
-    __m128i HashValue = _mm_cvtsi64_si128(Count);
+    __m128i HashValue = _mm_set_epi64x(reinterpret_cast<uint64_t>(Owner), static_cast<uint64_t>(Count));
     HashValue = _mm_xor_si128(HashValue, _mm_loadu_si128((__m128i *)Seedx16));
 
-    size_t ChunkCount = Count / 16;
+    size_t ChunkCount = Count / 4;
     while(ChunkCount--)
     {
-        __m128i In = _mm_loadu_si128((__m128i *)At);
-        At += 16;
+        __m128i In = _mm_loadu_si128((__m128i *)Codepoints);
+        Codepoints += 4;
 
         HashValue = _mm_xor_si128(HashValue, In);
         HashValue = _mm_aesdec_si128(HashValue, _mm_setzero_si128());
@@ -831,7 +837,7 @@ ComputeGlyphHash(size_t Count, char unsigned *At, char unsigned *Seedx16)
     __m128i In = _mm_loadu_si128((__m128i *)At);
 #else
     char Temp[16];
-    __movsb((unsigned char *)Temp, At, Overhang);
+    __movsb((unsigned char *)Temp, reinterpret_cast<BYTE *>(Codepoints), Overhang);
     __m128i In = _mm_loadu_si128((__m128i *)Temp);
 #endif
     In = _mm_and_si128(In, _mm_loadu_si128((__m128i *)(OverhangMask + 16 - Overhang)));
@@ -1168,8 +1174,254 @@ static bool IsValidGlyphGenerator(const glyph_generator &GlyphGenerator)
 
 
 // ==================================================================================
+// @Public : NText String Utilities
+// ==================================================================================
+
+struct word_slice
+{
+    uint64_t Start;
+    uint64_t Length;
+};
+
+
+struct word_slice_node
+{
+    word_slice_node *Next;
+    word_slice       Value;
+};
+
+
+struct word_slice_list
+{
+    word_slice_node *First;
+    word_slice_node *Last;
+    uint32_t         Count;
+};
+
+
+enum class TextAnalysis
+{
+    None               = 0,
+    GenerateWordSlices = 1,
+    SkipComplexCheck   = 2,
+};
+
+inline TextAnalysis operator|(TextAnalysis A, TextAnalysis B)   {return static_cast<TextAnalysis>(static_cast<int>(A) | static_cast<int>(B));}
+inline TextAnalysis operator&(TextAnalysis A, TextAnalysis B)   {return static_cast<TextAnalysis>(static_cast<int>(A) & static_cast<int>(B));}
+
+
+struct unicode_decode
+{
+    uint32_t Increment;
+    uint32_t Codepoint;
+};
+
+
+struct analysed_text
+{
+    bool             IsComplex;
+    word_slice_list  Words;
+    uint32_t        *Codepoints;
+    uint64_t         CodepointCount;
+};
+
+
+const static uint8_t UTF8Class[32] = 
+{
+  1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0,0,0,0,0,2,2,2,2,3,3,4,5,
+};
+
+
+static unicode_decode 
+UTF8Decode(char *String, uint64_t Maximum)
+{
+    unicode_decode Result = { 1, _UI32_MAX};
+
+    uint8_t Byte      = String[0];
+    uint8_t ByteClass = UTF8Class[Byte >> 3];
+
+    switch (ByteClass)
+    {
+
+    case 1:
+    {
+        Result.Codepoint = Byte;
+    } break;
+
+    case 2:
+    {
+        if (1 < Maximum)
+        {
+            char ContByte = String[1];
+            if (UTF8Class[ContByte >> 3] == 0)
+            {
+                Result.Codepoint  = (Byte     & 0b00011111) << 6;
+                Result.Codepoint |= (ContByte & 0b00111111) << 0;
+                Result.Increment  = 2;
+            }
+        }
+    } break;
+
+    case 3:
+    {
+        if (2 < Maximum)
+        {
+            char ContByte[2] = { String[1], String[2] };
+            if (UTF8Class[ContByte[0] >> 3] == 0 && UTF8Class[ContByte[1] >> 3] == 0)
+            {
+                Result.Codepoint  = ((Byte        & 0b00001111) << 12);
+                Result.Codepoint |= ((ContByte[0] & 0b00111111) << 6 );
+                Result.Codepoint |= ((ContByte[1] & 0b00111111) << 0 );
+                Result.Increment  = 3;
+            }
+        }
+    } break;
+
+    case 4:
+    {
+        if (3 < Maximum)
+        {
+            char ContByte[3] = { String[1], String[2], String[3] };
+            if (UTF8Class[ContByte[0] >> 3] == 0 && UTF8Class[ContByte[1] >> 3] == 0 && UTF8Class[ContByte[2] >> 3] == 0)
+            {
+                Result.Codepoint  = (Byte        & 0b00000111) << 18;
+                Result.Codepoint |= (ContByte[0] & 0b00111111) << 12;
+                Result.Codepoint |= (ContByte[1] & 0b00111111) << 6;
+                Result.Codepoint |= (ContByte[2] & 0b00111111) << 0;
+                Result.Increment = 4;
+            }
+        }
+    } break;
+
+    }
+
+    return Result;
+}
+
+
+static analysed_text
+AnalyzeText(char *Data, uint64_t Size, TextAnalysis Flags, glyph_generator &Generator)
+{
+    NTEXT_ASSERT(Data);
+    NTEXT_ASSERT(Size);
+
+    analysed_text Result =
+    {
+        .Codepoints = PushArray<uint32_t>(Generator.Arena, Size),
+    };
+
+    if(Result.Codepoints)
+    {
+        uint64_t DecodedBytes = 0;
+
+        while(DecodedBytes < Size)
+        {
+            unicode_decode Decoded = UTF8Decode(Data + DecodedBytes, Size - DecodedBytes);
+
+            Result.Codepoints[Result.CodepointCount++] = Decoded.Codepoint;
+            DecodedBytes                              += Decoded.Increment;
+        }
+
+        if(!((Flags & TextAnalysis::SkipComplexCheck) != TextAnalysis::None))
+        {
+            char    *At                = Data;
+            uint64_t Remaining         = Size;
+            uint64_t Advance           = 16;
+            __m128i  ComplexByteVector = _mm_set1_epi8(0x80);
+
+            __m128i HasComplex = _mm_setzero_si128();
+            while(Remaining >= Advance)
+            {
+                __m128i Batch = _mm_loadu_si128((__m128i *)At);
+                __m128i TextX = _mm_and_si128(Batch, ComplexByteVector);
+
+                HasComplex = _mm_or_si128(HasComplex, TextX);
+
+                if(_mm_movemask_epi8(HasComplex))
+                {
+                    Result.IsComplex = true;
+                    break;
+                }
+
+                Remaining -= Advance;
+                At        += Advance;
+            }
+
+            if(!Result.IsComplex)
+            {
+                while(Remaining--)
+                {
+                    if(*At == (char)0x80)
+                    {
+                        Result.IsComplex = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if((Flags & TextAnalysis::GenerateWordSlices) != TextAnalysis::None)
+        {
+            // We only handle simple ASCII path for now. Which is fine.
+
+            uint64_t CodepointIdx = 0;
+
+            while(CodepointIdx < Result.CodepointCount)
+            {
+                uint32_t Codepoint = Result.Codepoints[CodepointIdx];
+        
+                if(Codepoint != ' ' && Codepoint != '\t')
+                {
+                    word_slice_node *Node = PushStruct<word_slice_node>(Generator.Arena);
+                    if(Node)
+                    {
+                        word_slice_list &List = Result.Words;
+
+                        Node->Value.Start  = CodepointIdx;
+                        Node->Value.Length = 0;
+        
+                        if(!List.First)
+                        {
+                             List.First = Node;
+                        }
+            
+                        if(List.Last)
+                        {
+                            List.Last->Next = Node;
+                        }
+            
+                        List.Last   = Node;
+                        List.Count += 1;
+        
+                        Codepoint = Data[++CodepointIdx];
+                        while(CodepointIdx < Result.CodepointCount && Codepoint != ' ' && Codepoint != '\t')
+                        {
+                            CodepointIdx += 1;
+                            Codepoint     = Result.Codepoints[CodepointIdx];
+                        }
+        
+                        Node->Value.Length = CodepointIdx - Node->Value.Start;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+                else
+                {
+                    ++CodepointIdx;
+                }
+            }
+
+        }
+    }
+
+
+    return Result;
+}
+
+// ==================================================================================
 // @Public : NText Collection
-// Placeholder: texture & atlas routines
 // ==================================================================================
 
 enum class TextureFormat
@@ -1207,6 +1459,8 @@ struct shaped_glyph
     uint16_t          GlyphIndex;
     rectangle         Source;
     glyph_layout_info Layout;
+    uint32_t          ClusterStart;
+    uint32_t          ClusterCount;
 };
 
 
@@ -1218,117 +1472,60 @@ struct shaped_glyph_run
 };
 
 
-static uint64_t GetTextureFormatBytesPerPixel(TextureFormat Format)
+struct word_glyph_cursor
 {
-    switch(Format)
-    {
+    shaped_glyph *Glyphs;
+    uint32_t      GlyphCount;
+    uint32_t      GlyphAt;
+};
 
-    case TextureFormat::None:
-    {
-       return 0;
-    } break;
 
-    case TextureFormat::GreyScale:
-    {
-        return 1;
-    } break;
+struct word_advance
+{
+    float    Value;
+    uint64_t End;
+};
 
-    case TextureFormat::RGBA:
-    {
-        return 4;
-    } break;
-
-    }
-}
 
 // TODO: Error checks.
 
 static shaped_glyph_run
-FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
+FillAtlas(analysed_text Analysed, glyph_generator &Generator)
 {
     shaped_glyph_run Run = {};
-    Run.Shaped = PushArray<shaped_glyph>(Generator.Arena, Count);
+    Run.Shaped = PushArray<shaped_glyph>(Generator.Arena, Analysed.CodepointCount);
 
-    uint32_t Advance     = 16;
-    __m128i  ComplexByte = _mm_set1_epi8(0x80);
+    // Wait this is the fast path.
 
-    bool HasComplexCharacter = false;
-
-    // TODO: Rewrite this loop in a better way, since the only goal is to early
-    // exit if we find a complex character.
-
-    uint32_t ParseCount = Count;
-    char    *ParseData  = Data;
-
-    while(ParseCount)
+    if(!Analysed.IsComplex)
     {
-        __m128i ContainsComplex = _mm_setzero_si128();
-
-        while(ParseCount >= Advance)
+        for(uint32_t Idx = 0; Idx < Analysed.CodepointCount; ++Idx)
         {
-            __m128i Batch = _mm_loadu_si128((__m128i *) ParseData);
-            __m128i TestX = _mm_and_si128(Batch, ComplexByte);
-
-            // NOTE:
-            // If we break early, is there a better instruction than a OR?
-            // This is not great.
-
-            ContainsComplex = _mm_or_si128(ContainsComplex, TestX);
-            if(_mm_movemask_epi8(ContainsComplex))
-            {
-                break;
-            }
-
-            ParseCount -= Advance;
-            ParseData  += Advance;
-        }
-
-        HasComplexCharacter = _mm_movemask_epi8(ContainsComplex);
-        if(HasComplexCharacter)
-        {
-            break;
-        }
-
-        char Token = ParseData[0];
-        if(Token < 0)
-        {
-            HasComplexCharacter = 1;
-            break;
-        }
-
-        ParseData++;
-        ParseCount--;
-    }
-
-    if(HasComplexCharacter)
-    {
-        NTEXT_ASSERT(!"Not Implemented");
-    }
-    else
-    {
-        for(uint32_t Idx = 0; Idx < Count; ++Idx)
-        {
-            glyph_hash  Hash  = ComputeGlyphHash(1, (char unsigned *)&Data[Idx], DefaultSeed);
+            uint32_t Codepoint = Analysed.Codepoints[Idx];
+        
+            glyph_hash  Hash  = ComputeGlyphHash(1, &Codepoint, 0, DefaultSeed);
             glyph_state State = FindGlyphEntryByHash(Hash, Generator.GlyphTable);
-
+        
             if(!State.IsRasterized)
             {
-                os_glyph_info Info = Generator.Backend.FindGlyphInformation((uint32_t)Data[Idx], 16.f);
-
+                // We need to figure out fonts, instead of harcoding values.
+        
+                os_glyph_info Info = Generator.Backend.FindGlyphInformation(Codepoint, 16.f);
+        
                 // This cast is wrong/dangerous. Should probably round up or allow floating points in the packer?
-
+        
                 packed_rectangle Rectangle =
                 {
                     .Width  = static_cast<uint16_t>(Info.SizeX),
                     .Height = static_cast<uint16_t>(Info.SizeY),
                 };
-
+        
                 PackRectangle(Rectangle, Generator.Packer);
-
+        
                 if(Rectangle.WasPacked)
                 {
                     // This is just wrong. At least, what we return from the packer is confusing.
-
+        
                     rectangle Source =
                     {
                         .Left   = static_cast<float>(Rectangle.X),
@@ -1336,62 +1533,93 @@ FillAtlas(char *Data, uint64_t Count, glyph_generator &Generator)
                         .Right  = static_cast<float>(Rectangle.X + Rectangle.Width ),
                         .Bottom = static_cast<float>(Rectangle.Y + Rectangle.Height),
                     };
-
-                    // Shouldn't we check if this succeeded first?
-                    // What about white-spaces. How do we treat them?
-
+        
                     rasterized_buffer Buffer = Generator.Backend.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);
-
+        
                     if(Buffer.BytesPerPixel == 1 && Buffer.Data)
                     {
                         auto *Node = PushStruct<rasterized_glyph_node>(Generator.Arena);
                         if(Node)
                         {
                             rasterized_glyph_list &List = Run.UpdateList;
-    
+        
                             Node->Value.Buffer = Buffer;
                             Node->Value.Source = Source;
-    
+        
                             if(!List.First)
                             {
                                 List.First = Node;
                             }
-    
+        
                             if(List.Last)
                             {
                                 List.Last->Next = Node;
                             }
-    
+        
                             List.Last   = Node;
                             List.Count += 1;
                         }
                     }
-
+        
                     glyph_layout_info LayoutInfo =
                     {
                         .Advance = Info.Advance,
                         .OffsetX = Info.OffsetX,
                         .OffsetY = Info.OffsetY,
                     };
-
+        
                     State = UpdateGlyphTableEntry(State.Id, 1, Info.GlyphIndex, LayoutInfo, Source, Generator.GlyphTable);
                 }
             }
-
-            // This is, because it assumes that we always succeed? Maybe check if state is valid.
-            Run.Shaped[Run.ShapedCount++] = {.GlyphIndex = State.GlyphIndex, .Source = State.Source, .Layout = State.Layout};
+        
+            Run.Shaped[Run.ShapedCount++] = 
+            {
+                .GlyphIndex   = State.GlyphIndex,
+                .Source       = State.Source,
+                .Layout       = State.Layout,
+                .ClusterStart = Idx,
+                .ClusterCount = 1,
+            };
         }
     }
+    else
+    {
+        NTEXT_ASSERT(!"TODO: Implement Complex String Parsing");
+    }
+
 
     return Run;
 }
 
-
-static shaped_glyph_run
-FillAtlas(const char *Data, uint64_t Count, glyph_generator &Generator)
+static float
+AdvanceWord(word_glyph_cursor &Cursor, const word_slice &Slice)
 {
-    return FillAtlas((char *)Data, Count, Generator);
-}
+    float Advance = {};
 
+    uint64_t WordStart = Slice.Start;
+    uint64_t WordEnd   = Slice.Start + Slice.Length;
+
+    for(uint32_t Idx = Cursor.GlyphAt; Idx < Cursor.GlyphCount; ++Idx)
+    {
+        uint64_t GlyphStart = Cursor.Glyphs[Idx].ClusterStart;
+        uint64_t GlyphEnd   = GlyphStart + Cursor.Glyphs[Idx].ClusterCount;
+
+        if(GlyphEnd <= WordStart)
+        {
+            continue;
+        }
+
+        if(GlyphStart >= WordEnd)
+        {
+            Cursor.GlyphAt = Idx;
+            break;
+        }
+
+        Advance       += Cursor.Glyphs[Idx].Layout.Advance;
+        Cursor.GlyphAt = Idx + 1;
+    }
+
+    return Advance;
+}
 
 } // namespace ntext
