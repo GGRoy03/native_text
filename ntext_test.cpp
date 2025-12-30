@@ -79,33 +79,26 @@ int main()
     d3d11_renderer Renderer;
     Renderer.Init(HWindow, 1920, 1080);
 
-    // We need to specify the texture size here probably. Unsure where they are chosen from right now.
-
     ntext::glyph_generator_params Params = {};
     {
         Params.FrameMemoryBudget = 10 * 1024 * 1024;
         Params.FrameMemory       = malloc(Params.FrameMemoryBudget);
         Params.TextStorage       = ntext::TextStorage::LazyAtlas;
+        Params.CacheSizeX        = 1024;
+        Params.CacheSizeY        = 1024;
     }
 
+    ntext::backend_context Backend   = ntext::InitializeBackendContext();
+    ntext::system_font     Font      = ntext::LoadSystemFont("Consolas", 16.f, 0, Backend);
     ntext::glyph_generator Generator = ntext::CreateGlyphGenerator(Params);
 
-    
-    // This will return a list of buffers which we need to copy into our render texture.
-    ntext::shaped_glyph_run Run = ntext::FillAtlas("Hello.", sizeof("Hello") - 1, Generator);
+    ntext::TextAnalysis     Flags    = ntext::TextAnalysis::SkipComplexCheck;
+    ntext::analysed_text    Analysed = ntext::AnalyzeText((char *)"Hello", sizeof("Hello") - 1, Flags, Generator);
+    ntext::shaped_glyph_run Run      = ntext::FillAtlas(Analysed, Generator, Backend);
 
-    // So like do you have to iterate it twice to "save" the glyph informations?
-    // Won't even work, because we do not have enough information. If we were to push information into the list
-    // for every glyph in the string, then we could return a buffer and let the user iterate twice? Or once
-    // and and change how we rasterize? Uhm. Uhm. We'd just copy into some user struct, ui_text: buffer of
-    // glyphs... Uhmmmm. Iterate twice. Really? I think, just return two distincts collections.
-    // One containing all of the glyph layout information (with glyph index)
-
-    // Iterate1:StoreData
-    // Iterate2:Rasterize
     
     // Use the newly rasterized list to copy into the buffer.
-    Renderer.UpdateTextCache(Run.RasterizedList);
+    Renderer.UpdateTextCache(Run.UpdateList);
 
     while(true)
     {

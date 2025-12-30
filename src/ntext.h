@@ -59,11 +59,6 @@ static inline unsigned FindFirstBit(uint32_t Mask)
 #include <windows.h>
 #include <dwrite.h>
 
-#include <wrl.h>
-#include <vector>
-#include <cassert>
-#include <fstream>
-#include <iostream>
 
 #pragma comment(lib, "dwrite")
 #endif
@@ -112,6 +107,10 @@ PushArena(memory_arena *Arena, uint64_t Size, uint64_t Alignment)
     {
         Arena->Position = PostPosition;
         Result = ((uint8_t *)Arena + PrePosition);
+    }
+    else
+    {
+        NTEXT_ASSERT(!"Not Implemented");
     }
 
     return Result;
@@ -184,69 +183,9 @@ constexpr T* PushStruct(memory_arena* Arena)
 
 // ==================================================================================
 // @Internal : Win32 Implementation
-// Placeholder: DirectWrite integration & rasterization helpers
 // ==================================================================================
 
 #ifdef NTEXT_WIN32
-
-static bool WriteGrayscaleBMP(const wchar_t *path, int w, int h, BYTE *Pixels)
-{
-    if (w <= 0 || h <= 0) return false;
-
-    const int rowBytesUnpadded = w;
-    const int rowBytes = (rowBytesUnpadded + 3) & ~3;
-    const int imageSize = rowBytes * h;
-    const int fileHeaderSize = 14;
-    const int infoHeaderSize = 40;
-    const int paletteBytes = 256 * 4;
-    const int offsetToPixels = fileHeaderSize + infoHeaderSize + paletteBytes;
-    const int fileSize = offsetToPixels + imageSize;
-
-    std::ofstream f(path, std::ios::binary);
-    if (!f) return false;
-
-    f.put('B'); f.put('M');
-    f.write((const char *)&fileSize, 4);
-    int reserved = 0;
-    f.write((const char *)&reserved, 4);
-    f.write((const char *)&offsetToPixels, 4);
-
-    int infoSize = infoHeaderSize;
-    f.write((const char *)&infoSize, 4);
-    f.write((const char *)&w, 4);
-    f.write((const char *)&h, 4);
-    short planes = 1;
-    f.write((const char *)&planes, 2);
-    short bitcount = 8;
-    f.write((const char *)&bitcount, 2);
-    int compression = 0;
-    f.write((const char *)&compression, 4);
-    f.write((const char *)&imageSize, 4);
-    int ppm = 2835;
-    f.write((const char *)&ppm, 4);
-    f.write((const char *)&ppm, 4);
-    int clrUsed = 256;
-    f.write((const char *)&clrUsed, 4);
-    int clrImportant = 256;
-    f.write((const char *)&clrImportant, 4);
-
-    for (int i = 0; i < 256; ++i) {
-        unsigned char b = (unsigned char)i;
-        unsigned char g = (unsigned char)i;
-        unsigned char r = (unsigned char)i;
-        unsigned char a = 0;
-        f.put(b); f.put(g); f.put(r); f.put(a);
-    }
-
-    std::vector<BYTE> pad(rowBytes - rowBytesUnpadded);
-    for (int y = h - 1; y >= 0; --y) {
-        const BYTE *rowSrc = Pixels + y * w;
-        f.write((const char *)rowSrc, rowBytesUnpadded);
-        if (!pad.empty()) f.write((const char *)pad.data(), (std::streamsize)pad.size());
-    }
-    f.close();
-    return true;
-}
 
 
 struct os_glyph_info
@@ -273,81 +212,98 @@ struct rasterized_buffer
 
 struct backend_context
 {
-    bool              IsValid                       ();
-
-    os_glyph_info     FindGlyphInformation          (uint32_t CodePointer, float FontSize);
-    rasterized_buffer RasterizeGlyphToAlphaTexture  (uint16_t GlyphIndex, float Advance, float EmSize, memory_arena *Arena);
-
     IDWriteFactory  *DirectWrite;
-    IDWriteFontFace *Font;
 };
 
 
-static backend_context CreateBackendContext(void)
+struct system_font
 {
-    backend_context Context = {};
-
-    IDWriteFactory *DirectWrite;
-    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown **>(&DirectWrite));
-
-    NTEXT_ASSERT(DirectWrite);
-
-    IDWriteFontCollection *Fonts;
-    DirectWrite->GetSystemFontCollection(&Fonts);
-    NTEXT_ASSERT(Fonts);
-
-    UINT32 FamilyIndex = 0;
-    BOOL   Exists      = FALSE;
-    const wchar_t *FamilyToFind = L"Segoe UI";
-    Fonts->FindFamilyName(FamilyToFind, &FamilyIndex, &Exists);
-    NTEXT_ASSERT(Exists);
-
-    IDWriteFontFamily *Family;
-    Fonts->GetFontFamily(FamilyIndex, &Family);
-    NTEXT_ASSERT(Family);
-
-    IDWriteFont *Font;
-    Family->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL,
-                                 DWRITE_FONT_STRETCH_NORMAL,
-                                 DWRITE_FONT_STYLE_NORMAL,
-                                &Font);
-    NTEXT_ASSERT(Font);
-
     IDWriteFontFace *FontFace;
-    Font->CreateFontFace(&FontFace);
-    NTEXT_ASSERT(Font);
-
-    Context.DirectWrite = DirectWrite;
-    Context.Font        = FontFace;
-
-    return Context;
-}
+    float            Size;
+};
 
 
-bool backend_context::IsValid()
+static bool
+IsValidSystemFont(system_font *Font)
 {
-    bool Result = (this->DirectWrite) && (this->Font);
+    bool Result = (Font && Font->FontFace && Font->Size);
     return Result;
 }
 
 
-// TODO: Error checking
-
-os_glyph_info
-backend_context::FindGlyphInformation(uint32_t CodePoint, float EmSize)
+static system_font
+LoadSystemFont(const char *Name, float Size, memory_arena *Arena, backend_context Backend)
 {
-    IDWriteFontFace *FontFace = this->Font;
+    system_font     SystemFont  = {};
+    IDWriteFactory *DirectWrite = Backend.DirectWrite;
 
+    IDWriteFontCollection *Fonts;
+    DirectWrite->GetSystemFontCollection(&Fonts);
+    if(Fonts)
+    {
+        int    Length   = MultiByteToWideChar(CP_UTF8, 0, Name, strlen(Name), 0, 0);
+        WCHAR *WideName = PushArray<WCHAR>(Arena, Length);
+        int    Written  = MultiByteToWideChar(CP_UTF8, 0, Name, strlen(Name), WideName, Length);
+
+        if(Written == Length)
+        {
+            UINT32 FamilyIndex = 0;
+            BOOL   Exists      = FALSE;
+            Fonts->FindFamilyName(WideName, &FamilyIndex, &Exists);
+
+            if(Exists)
+            {
+                IDWriteFontFamily *Family;
+                Fonts->GetFontFamily(FamilyIndex, &Family);
+
+                IDWriteFont *Font;
+                Family->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, &Font);
+
+                if(Font)
+                {
+                    Font->CreateFontFace(&SystemFont.FontFace);
+                    SystemFont.Size = Size;
+                }
+            }
+        }
+    }
+
+    return SystemFont;
+}
+
+
+static bool
+IsValidBackendContext(backend_context *Backend)
+{
+    bool Result = (Backend && Backend->DirectWrite);
+    return Result;
+}
+
+
+static backend_context
+InitializeBackendContext(void)
+{
+    backend_context Result = {};
+
+    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown **>(&Result.DirectWrite));
+
+    return Result;
+}
+
+
+static os_glyph_info
+FindGlyphInformation(uint32_t CodePoint, system_font Font)
+{
     UINT16 GlyphIndex = 0;
-    FontFace->GetGlyphIndices(&CodePoint, 1, &GlyphIndex);
+    Font.FontFace->GetGlyphIndices(&CodePoint, 1, &GlyphIndex);
 
     DWRITE_GLYPH_METRICS GlyphMetrics = {};
-    FontFace->GetDesignGlyphMetrics(&GlyphIndex, 1, &GlyphMetrics, FALSE);
+    Font.FontFace->GetDesignGlyphMetrics(&GlyphIndex, 1, &GlyphMetrics, FALSE);
 
     DWRITE_FONT_METRICS FontMetrics = {};
-    FontFace->GetMetrics(&FontMetrics);
+    Font.FontFace->GetMetrics(&FontMetrics);
 
-    float Scale = (FontMetrics.designUnitsPerEm > 0) ? (EmSize / (float)FontMetrics.designUnitsPerEm) : 1.0f;
+    float Scale = (FontMetrics.designUnitsPerEm > 0) ? (Font.Size / (float)FontMetrics.designUnitsPerEm) : 1.0f;
 
     int32_t  Left    = GlyphMetrics.leftSideBearing;
     uint32_t Advance = GlyphMetrics.advanceWidth;
@@ -369,85 +325,79 @@ backend_context::FindGlyphInformation(uint32_t CodePoint, float EmSize)
     return Result;
 }
 
-// TODO: Error Checking
 
-rasterized_buffer
-backend_context::RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance, float EmSize, memory_arena *Arena)
+static rasterized_buffer
+RasterizeGlyphToAlphaTexture(uint16_t GlyphIndex, float Advance, system_font Font, backend_context Backend, memory_arena *Arena)
 {
     rasterized_buffer Result = {};
 
-    // Need to check for NULL here? Maybe assert since it probably needs to be done before this point.
-
-    IDWriteFontFace *FontFace = this->Font;
-    IDWriteFactory  *DWrite   = this->DirectWrite;
-
-    UINT16              GlyphIndices[1] = {GlyphIndex};
-    FLOAT               Advances[1]     = {Advance};
-    DWRITE_GLYPH_OFFSET Offsets[1]      = {{0.f, 0.f}};
-
-    DWRITE_GLYPH_RUN GlyphRun =
+    if(IsValidSystemFont(&Font) && IsValidBackendContext(&Backend))
     {
-        .fontFace      = FontFace,
-        .fontEmSize    = EmSize,
-        .glyphCount    = 1,
-        .glyphIndices  = GlyphIndices,
-        .glyphAdvances = Advances,
-        .glyphOffsets  = Offsets,
-        .isSideways    = FALSE,
-        .bidiLevel     = 0,
-    };
+        IDWriteFontFace *FontFace = Font.FontFace;
+        IDWriteFactory  *DWrite   = Backend.DirectWrite;
 
-    IDWriteGlyphRunAnalysis *RunAnalysis = 0;
-    DWrite->CreateGlyphRunAnalysis(&GlyphRun, 1.f, 0,
-                                   DWRITE_RENDERING_MODE_ALIASED, DWRITE_MEASURING_MODE_NATURAL,
-                                   0.f, 0.f, &RunAnalysis);
-
-    if(RunAnalysis)
-    {
-        RECT TextureBounds = {};
-        RunAnalysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds);
-
-        int TextureWidth  = TextureBounds.right  - TextureBounds.left;
-        int TextureHeight = TextureBounds.bottom - TextureBounds.top;
-
-        if(TextureWidth > 0 && TextureHeight > 0)
+        UINT16              GlyphIndices[1] = {GlyphIndex};
+        FLOAT               Advances[1]     = {Advance};
+        DWRITE_GLYPH_OFFSET Offsets[1]      = {{0.f, 0.f}};
+    
+        DWRITE_GLYPH_RUN GlyphRun =
         {
-            int      BytesPerPixel = 1;
-            int      Stride        = TextureWidth * BytesPerPixel;
-            uint32_t BufferSize    = TextureWidth * TextureHeight * BytesPerPixel;
-
-            BYTE *Buffer = PushArray<BYTE>(Arena, BufferSize);
-            if(Buffer)
+            .fontFace      = FontFace,
+            .fontEmSize    = Font.Size,
+            .glyphCount    = 1,
+            .glyphIndices  = GlyphIndices,
+            .glyphAdvances = Advances,
+            .glyphOffsets  = Offsets,
+            .isSideways    = FALSE,
+            .bidiLevel     = 0,
+        };
+    
+        IDWriteGlyphRunAnalysis *RunAnalysis = 0;
+        DWrite->CreateGlyphRunAnalysis(&GlyphRun, 1.f, 0,
+                                       DWRITE_RENDERING_MODE_ALIASED, DWRITE_MEASURING_MODE_NATURAL,
+                                       0.f, 0.f, &RunAnalysis);
+    
+        if(RunAnalysis)
+        {
+            RECT TextureBounds = {};
+            RunAnalysis->GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds);
+    
+            int TextureWidth  = TextureBounds.right  - TextureBounds.left;
+            int TextureHeight = TextureBounds.bottom - TextureBounds.top;
+    
+            if(TextureWidth > 0 && TextureHeight > 0)
             {
-                if(RunAnalysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds, Buffer, BufferSize) == S_OK)
+                int      BytesPerPixel = 1;
+                int      Stride        = TextureWidth * BytesPerPixel;
+                uint32_t BufferSize    = TextureWidth * TextureHeight * BytesPerPixel;
+    
+                BYTE *Buffer = PushArray<BYTE>(Arena, BufferSize);
+                if(Buffer)
                 {
-                    Result.Data          = Buffer;
-                    Result.Stride        = Stride;
-                    Result.Width         = TextureWidth;
-                    Result.Height        = TextureHeight;
-                    Result.BytesPerPixel = BytesPerPixel;
+                    if(RunAnalysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &TextureBounds, Buffer, BufferSize) == S_OK)
+                    {
+                        Result.Data          = Buffer;
+                        Result.Stride        = Stride;
+                        Result.Width         = TextureWidth;
+                        Result.Height        = TextureHeight;
+                        Result.BytesPerPixel = BytesPerPixel;
+                    }
                 }
             }
-
-             static int Counter = 0;
-             wchar_t OutPath[64];
-             swprintf(OutPath, 64, L"glyph_alpha_%d.bmp", Counter++);
-             WriteGrayscaleBMP(OutPath, TextureWidth, TextureHeight, Buffer);
+    
+            RunAnalysis->Release();
         }
-
-        RunAnalysis->Release();
     }
+
 
     return Result;
 }
-
 
 #endif // NTEXT_WIN32
 
 
 // ==================================================================================
 // @Internal : Rectangle Packing
-// Placeholder: rectangle packing utilities
 // ==================================================================================
 
 struct point
@@ -689,7 +639,7 @@ struct glyph_table_params
 
 struct glyph_hash
 {
-    __m128i Value;
+    alignas(16)__m128i Value;
 };
 
 
@@ -873,61 +823,73 @@ GlyphHashesAreEqual(glyph_hash A, glyph_hash B)
     return (Mask == 0xFFFF);
 }
 
+// I need to understand alignment. 
+// It's simple, but I make the same mistake everywhere in the code 
+// which might cause a bunch of other issues. Need to focus on that.
+// Why is it that the refterm code does not handle that? Or does it when allocating?
+
 
 static uint64_t
 GetGlyphTableFootprint(glyph_table_params Params)
 {
     uint64_t SlotCount = Params.GroupCount * static_cast<uint32_t>(Params.GroupWidth);
-
     uint64_t MetadataSize = SlotCount * sizeof(uint8_t);
-    uint64_t BucketsSize  = (SlotCount + 1) * sizeof(glyph_entry); // Accounts for sentinel.
-    uint64_t Result       = MetadataSize + BucketsSize + sizeof(glyph_table);
+    uint64_t BucketsSize = (SlotCount + 1) * sizeof(glyph_entry); // Accounts for sentinel.
+    uint64_t TableSize = sizeof(glyph_table);
 
+    // Account for alignment padding (16 bytes per section)
+    uint64_t Result = MetadataSize + 15  // Metadata
+        + BucketsSize + 15   // Buckets
+        + TableSize + 15;    // Table
     return Result;
 }
-
 
 static glyph_table *
 PlaceGlyphTableInMemory(glyph_table_params Params, void *Memory)
 {
     glyph_table *Result = 0;
-
-    if(Memory)
+    if (Memory)
     {
         uint64_t SlotCount = Params.GroupCount * static_cast<uint32_t>(Params.GroupWidth);
 
-        uint8_t     *Metadata = static_cast<uint8_t *>(Memory);
-        glyph_entry *Buckets  = reinterpret_cast<glyph_entry*>(Metadata + SlotCount);
+        uintptr_t MetadataAddr = reinterpret_cast<uintptr_t>(Memory);
+        MetadataAddr = (MetadataAddr + 15) & ~15ULL;
+        uint8_t *Metadata = reinterpret_cast<uint8_t *>(MetadataAddr);
 
-        Result = reinterpret_cast<glyph_table *>(Buckets + SlotCount + 1); // Skip sentinel
-        Result->Metadata      = Metadata;
-        Result->Buckets       = Buckets;
-        Result->GroupWidth    = static_cast<uint64_t>(Params.GroupWidth);
-        Result->GroupCount    = Params.GroupCount;
-        Result->HashMask      = Params.GroupCount - 1; // Only used to find the group index, not the slot index
+        uintptr_t BucketsAddr = MetadataAddr + (SlotCount * sizeof(uint8_t));
+        BucketsAddr = (BucketsAddr + 15) & ~15ULL;
+        glyph_entry *Buckets = reinterpret_cast<glyph_entry *>(BucketsAddr);
+
+        uintptr_t ResultAddr = BucketsAddr + ((SlotCount + 1) * sizeof(glyph_entry));
+        ResultAddr = (ResultAddr + 15) & ~15ULL;
+        Result = reinterpret_cast<glyph_table *>(ResultAddr);
+
+        Result->Metadata = Metadata;
+        Result->Buckets = Buckets;
+        Result->GroupWidth = static_cast<uint64_t>(Params.GroupWidth);
+        Result->GroupCount = Params.GroupCount;
+        Result->HashMask = Params.GroupCount - 1;
         Result->SentinelIndex = SlotCount;
 
-        for(uint32_t Idx = 0; Idx < SlotCount; ++Idx)
+        for (uint32_t Idx = 0; Idx < SlotCount; ++Idx)
         {
             glyph_entry *Entry = GetGlyphEntry(Idx, Result);
-            Entry->GlyphIndex   = 0;
-            Entry->Source       = {};
-            Entry->Layout       = {};
+            Entry->GlyphIndex = 0;
+            Entry->Source = {};
+            Entry->Layout = {};
             Entry->IsRasterized = false;
         }
 
-        for(uint32_t Idx = 0; Idx < SlotCount; ++Idx)
+        for (uint32_t Idx = 0; Idx < SlotCount; ++Idx)
         {
             Result->Metadata[Idx] = GlyphTableEmptyMask;
         }
 
         glyph_entry *Sentinel = GetGlyphTableSentinel(Result);
         NTEXT_ASSERT(Sentinel);
-
         Sentinel->PrevLRU = Result->SentinelIndex;
         Sentinel->NextLRU = Result->SentinelIndex;
     }
-
     return Result;
 }
 
@@ -1014,8 +976,12 @@ FindGlyphEntryByHash(glyph_hash Hash, glyph_table *Table)
         // Since the tag is 00XX XXXX, we clear the state bits.
         Table->Metadata[EntryIndex] = GetGlyphTagFromHash(Hash).Value;
 
+
         Result = GetGlyphEntry(EntryIndex, Table);
-        Result->Hash = Hash;
+        if (Result)
+        {
+            Result->Hash = Hash;
+        }
     }
 
     glyph_entry *Sentinel = GetGlyphTableSentinel(Table);
@@ -1087,6 +1053,7 @@ struct glyph_generator_params
 };
 
 
+// TODO: Add (System) Font Support
 struct glyph_generator
 {
     // Memory
@@ -1098,13 +1065,13 @@ struct glyph_generator
 
     // Misc
     TextStorage       TextStorage;
-    backend_context   Backend;
 };
 
 // Should we add a function to get the static footprint for the glyph generator?
 
 
-static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
+static glyph_generator
+CreateGlyphGenerator(glyph_generator_params Params)
 {
     glyph_generator Generator = {};
 
@@ -1157,11 +1124,6 @@ static glyph_generator CreateGlyphGenerator(glyph_generator_params Params)
         Generator.TextStorage = Params.TextStorage;
     }
 
-    // Backend Initialization
-    {
-        Generator.Backend = CreateBackendContext();
-    }
-
     return Generator;
 }
 
@@ -1203,7 +1165,7 @@ enum class TextAnalysis
 {
     None               = 0,
     GenerateWordSlices = 1,
-    SkipComplexCheck   = 2,
+    SkipComplexCheck   = 2, // Rename this to something like IsAsciiUnsafe?
 };
 
 inline TextAnalysis operator|(TextAnalysis A, TextAnalysis B)   {return static_cast<TextAnalysis>(static_cast<int>(A) | static_cast<int>(B));}
@@ -1223,6 +1185,7 @@ struct analysed_text
     word_slice_list  Words;
     uint32_t        *Codepoints;
     uint64_t         CodepointCount;
+    uint64_t         GlyphCount;
 };
 
 
@@ -1481,20 +1444,17 @@ struct word_glyph_cursor
 
 struct word_advance
 {
-    float    Value;
-    uint64_t End;
+    float Advance;
+    float LeadingWhitespaceAdvance;
 };
 
 
 // TODO: Error checks.
-
 static shaped_glyph_run
-FillAtlas(analysed_text Analysed, glyph_generator &Generator)
+FillAtlas(analysed_text Analysed, glyph_generator &Generator, system_font Font, backend_context Backend)
 {
     shaped_glyph_run Run = {};
     Run.Shaped = PushArray<shaped_glyph>(Generator.Arena, Analysed.CodepointCount);
-
-    // Wait this is the fast path.
 
     if(!Analysed.IsComplex)
     {
@@ -1507,9 +1467,7 @@ FillAtlas(analysed_text Analysed, glyph_generator &Generator)
         
             if(!State.IsRasterized)
             {
-                // We need to figure out fonts, instead of harcoding values.
-        
-                os_glyph_info Info = Generator.Backend.FindGlyphInformation(Codepoint, 16.f);
+                os_glyph_info Info = FindGlyphInformation(Codepoint, Font);
         
                 // This cast is wrong/dangerous. Should probably round up or allow floating points in the packer?
         
@@ -1533,7 +1491,7 @@ FillAtlas(analysed_text Analysed, glyph_generator &Generator)
                         .Bottom = static_cast<float>(Rectangle.Y + Rectangle.Height),
                     };
         
-                    rasterized_buffer Buffer = Generator.Backend.RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, 16.f, Generator.Arena);
+                    rasterized_buffer Buffer = RasterizeGlyphToAlphaTexture(Info.GlyphIndex, Info.Advance, Font, Backend, Generator.Arena);
         
                     if(Buffer.BytesPerPixel == 1 && Buffer.Data)
                     {
@@ -1590,10 +1548,11 @@ FillAtlas(analysed_text Analysed, glyph_generator &Generator)
     return Run;
 }
 
-static float
+
+static word_advance
 AdvanceWord(word_glyph_cursor &Cursor, const word_slice &Slice)
 {
-    float Advance = {};
+    word_advance Result = {};
 
     uint64_t WordStart = Slice.Start;
     uint64_t WordEnd   = Slice.Start + Slice.Length;
@@ -1605,6 +1564,7 @@ AdvanceWord(word_glyph_cursor &Cursor, const word_slice &Slice)
 
         if(GlyphEnd <= WordStart)
         {
+            Result.LeadingWhitespaceAdvance += Cursor.Glyphs[Idx].Layout.Advance;
             continue;
         }
 
@@ -1614,11 +1574,12 @@ AdvanceWord(word_glyph_cursor &Cursor, const word_slice &Slice)
             break;
         }
 
-        Advance       += Cursor.Glyphs[Idx].Layout.Advance;
-        Cursor.GlyphAt = Idx + 1;
+        Result.Advance += Cursor.Glyphs[Idx].Layout.Advance;
+        Cursor.GlyphAt  = Idx + 1;
     }
 
-    return Advance;
+    return Result;
 }
+
 
 } // namespace ntext
